@@ -46,6 +46,7 @@ def main(report_dir: Path) -> dict:
     weekly_all = grouped(read_frame(data_dir / "weekly.csv"))
     monthly_all = grouped(read_frame(data_dir / "monthly.csv"))
     fifteen_all = grouped(read_frame(data_dir / "fifteen.csv", minute=True))
+    one_min_all = grouped(read_frame(data_dir / "one_min.csv", minute=True))
     kpl_path = data_dir / "kpl_history.csv"
     kpl = pd.read_csv(kpl_path, low_memory=False) if kpl_path.exists() and kpl_path.stat().st_size else pd.DataFrame()
     if not kpl.empty:
@@ -71,6 +72,7 @@ def main(report_dir: Path) -> dict:
             w = weekly_all.get(code, pd.DataFrame())
             m = monthly_all.get(code, pd.DataFrame())
             full_f = fifteen_all.get(code, pd.DataFrame())
+            full_min = one_min_all.get(code, pd.DataFrame())
             d = d[d.date.ge(daily_start)].copy() if not d.empty else d
             w = w[w.date.ge(weekly_start)].copy() if not w.empty else w
             m = m[m.date.ge(monthly_start)].copy() if not m.empty else m
@@ -83,14 +85,18 @@ def main(report_dir: Path) -> dict:
             plotter.plot_overview_page(ts_code=code, name=item["name"], theme=item["theme"],
                 end_date=summary["anchor_date"], daily=d, weekly=w, monthly=m,
                 limit_dates=marks, save_path=overview)
-            plotter.plot_intraday_days(ts_code=code, name=item["name"], end_date=summary["anchor_date"],
-                frame=full_f, session_dates=summary["intraday_trading_dates_5"], save_path=intraday)
+            minute_days = full_min[full_min.date.isin(pd.to_datetime(summary["intraday_trading_dates_5"]))].copy() if not full_min.empty else full_min
+            plotter.plot_intraday_review_page(ts_code=code, name=item["name"], end_date=summary["anchor_date"],
+                minute_frame=minute_days, fifteen_frame=f, daily=d,
+                session_dates=summary["intraday_trading_dates_5"], save_path=intraday,
+                quality_flag_count=int(summary.get("one_min_quality_flags_by_stock", {}).get(code, 0)))
             item["overview_image"] = str(overview.relative_to(report_dir))
             item["intraday_image"] = str(intraday.relative_to(report_dir))
             item["chart_coverage"] = {
                 "daily_bars_18m": int(len(d)), "weekly_bars_5y": int(len(w)),
                 "monthly_bars_10y": int(len(m)), "fifteen_min_bars_3m": int(len(f)),
-                "intraday_5d_bars": int(full_f.date.isin(pd.to_datetime(summary["intraday_trading_dates_5"])).sum()) if not full_f.empty else 0,
+                "one_min_bars_5d": int(len(minute_days)),
+                "one_min_trading_sessions": int(minute_days.date.nunique()) if not minute_days.empty else 0,
                 "limit_up_marks_18m": int(len(marks)),
             }
             if i % 25 == 0 or i == len(records):

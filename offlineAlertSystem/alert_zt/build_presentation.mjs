@@ -41,7 +41,7 @@ async function addChart(slide,filename,alt,position){
 }
 const dataDir=path.dirname(process.env.DECK_DATA);
 const topThemes=summary.theme_heat.slice(0,8).map(x=>`${x.theme} ${x.limit_up_stocks}只`).join('  |  ');
-const dataUpdate=`KPL ${fmt(summary.data_limits.kpl_latest_date)}  日线 ${fmt(summary.data_limits.daily_latest)}  周线 ${fmt(summary.data_limits.weekly_latest)}  月线 ${fmt(summary.data_limits.monthly_latest)}  15分钟 ${fmt(summary.data_limits.fifteen_min_latest)}`;
+const dataUpdate=`KPL ${fmt(summary.data_limits.kpl_latest_date)}  日线 ${fmt(summary.data_limits.daily_latest)}  周线 ${fmt(summary.data_limits.weekly_latest)}  月线 ${fmt(summary.data_limits.monthly_latest)}  15分钟 ${fmt(summary.data_limits.fifteen_min_latest)}  1分钟 ${fmt(summary.data_limits.one_min_latest)}`;
 {
   const notes=[
     `榜单日：${summary.anchor_date}`,
@@ -67,12 +67,12 @@ const dataUpdate=`KPL ${fmt(summary.data_limits.kpl_latest_date)}  日线 ${fmt(
   text(s,`行情数据截止：${dataUpdate}`,
     {left:60,top:538,width:1480,height:42},22,muted);
   text(s,summary.intraday_source_note,
-    {left:60,top:584,width:1480,height:82},22,muted);
+    {left:60,top:584,width:1480,height:82},17,muted);
   text(s,'均线：价格MA5/10/20/30/60/120/250；成交量MA5/20/60。历史不足的周期不显示。',
     {left:60,top:657,width:1480,height:40},21,muted);
   text(s,'重要等级是规则化观察优先级，不是预测分数。具体规则见演示备注。',
     {left:60,top:700,width:1480,height:45},22,muted);
-  text(s,'每只股票两页：日线、周线、月线；近5日分时、成交量和动态均线。',
+  text(s,'每只股票两页：日线、周线、月线；5日1分钟分时与3个月15分钟K线。',
     {left:60,top:780,width:1480,height:44},24,ink,true);
 }
 for(let i=0;i<candidates.length;i++){
@@ -90,15 +90,15 @@ for(let i=0;i<candidates.length;i++){
   text(s1,details,{left:40,top:73,width:1518,height:36},24,accent,true);
   text(s1,r.reason,{left:42,top:108,width:1510,height:38},19,muted);
   await addChart(s1,path.join(dataDir,r.overview_image),`${r.name}日线周线月线图`,
-    {left:32,top:151,width:1536,height:768});
+    {left:32,top:151,width:1536,height:700});
   manifest.at(-1).ts_code=r.ts_code;manifest.at(-1).theme=r.theme;
 
   const s2=newSlide(`${String(i+1).padStart(3,'0')}  ${header}`,'stock-intraday',notes);
   text(s2,details,{left:40,top:73,width:1518,height:36},24,accent,true);
-  text(s2,`${summary.intraday_source_note}  交易日：${summary.intraday_trading_dates_5.map(fmt).join('、')}`,
+  text(s2,`上：5日1分钟分时（含日内均价、动态MA5/10/20和成交量）；下：3个月15分钟K线。交易日：${summary.intraday_trading_dates_5.map(fmt).join('、')}`,
     {left:42,top:108,width:1510,height:38},18,muted);
   await addChart(s2,path.join(dataDir,r.intraday_image),`${r.name}最近5日分时与成交量`,
-    {left:32,top:151,width:1536,height:768});
+    {left:32,top:151,width:1536,height:700});
   manifest.at(-1).ts_code=r.ts_code;manifest.at(-1).theme=r.theme;
   if((i+1)%25===0)console.log(`已编排 ${i+1}/${candidates.length} 只股票`);
 }

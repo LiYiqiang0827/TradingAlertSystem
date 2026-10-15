@@ -389,3 +389,115 @@ class KlinePlot:
         fig.savefig(path, format="jpeg", dpi=100, pil_kwargs={"quality": 86, "optimize": True})
         plt.close(fig)
         return path
+
+
+    def plot_intraday_review_page(self, *, ts_code: str, name: str, end_date: str,
+                                  minute_frame: pd.DataFrame, fifteen_frame: pd.DataFrame,
+                                  daily: pd.DataFrame, session_dates: Sequence[str],
+                                  save_path: str | Path, quality_flag_count: int = 0) -> Path:
+        """Compose five-session 1-minute intraday and three-month 15-minute panels."""
+        path = Path(save_path); path.parent.mkdir(parents=True, exist_ok=True)
+        plt = _matplotlib(); _configure_font()
+        fig = plt.figure(figsize=(16, 8.5), dpi=100)
+        gs = fig.add_gridspec(4, 1, height_ratios=[2.3, 0.78, 2.25, 0.82], hspace=0.25)
+        ax = fig.add_subplot(gs[0]); vol_ax = fig.add_subplot(gs[1], sharex=ax)
+        f_ax = fig.add_subplot(gs[2]); f_vol_ax = fig.add_subplot(gs[3], sharex=f_ax)
+        palette = ["#7f8c8d", "#5587a5", "#9575a8", "#6a9d75", "#e06b43"]
+        if minute_frame.empty:
+            ax.text(0.5, 0.5, "无可用1分钟分时数据", transform=ax.transAxes, ha="center", va="center")
+            vol_ax.axis("off")
+        else:
+            minute = minute_frame.copy()
+            minute["datetime"] = pd.to_datetime(minute["datetime"], errors="coerce")
+            minute["date"] = pd.to_datetime(minute["date"], errors="coerce").dt.normalize()
+            minute = minute[minute.date.isin(pd.to_datetime(list(session_dates)).normalize())].copy()
+            minute["time_idx"] = pd.to_numeric(minute["time_idx"], errors="coerce").fillna(0).astype(int)
+            history = daily.copy()
+            if not history.empty:
+                history["date"] = pd.to_datetime(history["date"], errors="coerce").dt.normalize()
+                daily_close = {row.date: float(row.close) for row in history.itertuples() if pd.notna(row.close)}
+            else:
+                daily_close = {}
+            bars_per_day = max(240, int(minute.time_idx.max()) + 1)
+            gap = 5
+            slot = bars_per_day + gap
+            tick_positions=[]; tick_labels=[]
+            for di, date_text in enumerate(session_dates):
+                date = pd.Timestamp(date_text).normalize()
+                day = minute[minute.date.eq(date)].sort_values("datetime").copy()
+                if day.empty:
+                    continue
+                base_x = di * slot
+                x = base_x + day.time_idx.to_numpy()
+                color = palette[di % len(palette)]
+                ax.plot(x, day.close.to_numpy(dtype=float), color=color, lw=0.72,
+                        label=f"{date:%m-%d} 分时")
+                vol = pd.to_numeric(day.vol, errors="coerce").fillna(0).to_numpy(dtype=float)
+                amount = pd.to_numeric(day.amount, errors="coerce").fillna(0).to_numpy(dtype=float)
+                cumvol = np.cumsum(vol)
+                vwap = np.divide(np.cumsum(amount), cumvol, out=np.full_like(cumvol, np.nan), where=cumvol != 0)
+                ax.plot(x, vwap, color=color, lw=0.8, ls="--", alpha=0.88,
+                        label="日内均价" if di == 0 else None)
+                vol_ax.bar(x, vol, width=0.86, color=color, alpha=0.48)
+                previous = sorted(d for d in daily_close if d < date)
+                for n in (5, 10, 20):
+                    prior = [daily_close[d] for d in previous[-(n-1):]]
+                    if len(prior) == n-1:
+                        dynamic = (sum(prior) + day.close.to_numpy(dtype=float)) / n
+                        ax.plot(x, dynamic, color=MA_COLORS[n], lw=0.95,
+                                label=f"动态MA{n}" if di == 0 else None,
+                                alpha=0.9 if di == 0 else 0.65)
+                for n in VOLUME_MAS:
+                    if len(vol) >= n:
+                        vma = pd.Series(vol).rolling(n, min_periods=n).mean().to_numpy()
+                        vol_ax.plot(x, vma, color=MA_COLORS[n], lw=0.65,
+                                    label=f"量MA{n}" if di == 0 else None)
+                left = base_x - gap / 2
+                ax.axvline(left, color="#c7cfd5", lw=0.5, ls=":")
+                tick_positions.extend([base_x, base_x + 119, base_x + 239])
+                tick_labels.extend(["09:31", "11:30", "15:00"])
+                vol_ax.text(base_x + 119, -0.42, f"{date:%m/%d}", transform=vol_ax.get_xaxis_transform(),
+                            ha="center", va="top", fontsize=5.6, clip_on=False)
+            ax.set_xticks(tick_positions); ax.tick_params(axis="x", labelbottom=False)
+            vol_ax.set_xticks(tick_positions); vol_ax.set_xticklabels(tick_labels, fontsize=5.2)
+            vol_ax.tick_params(axis="x", pad=1)
+            ax.set_title("近5个交易日 1分钟分时：收盘价、日内均价、动态MA5/10/20", loc="left", fontsize=8.8, pad=2)
+            ax.legend(loc="upper left", ncol=8, fontsize=5.8, frameon=False, handlelength=1.1)
+            vol_ax.legend(loc="upper left", ncol=3, fontsize=5.5, frameon=False, handlelength=1.0)
+            ax.set_xlim(-gap, (len(session_dates)-1)*slot+bars_per_day+gap)
+        ax.grid(axis="y", color="#d9dfe5", lw=0.4)
+        ax.spines[["top", "right"]].set_visible(False); vol_ax.spines[["top", "right"]].set_visible(False)
+        ax.tick_params(axis="y", labelsize=6); vol_ax.tick_params(axis="y", labelsize=5)
+        vol_ax.set_ylabel("成交量（股）", fontsize=6)
+
+        if fifteen_frame.empty:
+            f_ax.text(0.5, 0.5, "无可用15分钟K线", transform=f_ax.transAxes, ha="center", va="center")
+            f_vol_ax.axis("off")
+        else:
+            f = fifteen_frame.copy().sort_values("datetime").reset_index(drop=True)
+            x = np.arange(len(f))
+            _draw_candles(f_ax, f, width=0.62)
+            for n in PRICE_MAS:
+                col=f"ma{n}"
+                if col in f and f[col].notna().any():
+                    f_ax.plot(x, f[col], color=MA_COLORS[n], lw=0.75, label=f"MA{n}")
+            _plot_volume(f_vol_ax, f, compact=True)
+            step=max(1,len(f)//12)
+            ticks=list(range(0,len(f),step))
+            f_ax.set_xticks(ticks); f_ax.tick_params(axis="x", labelbottom=False)
+            f_vol_ax.set_xticks(ticks)
+            f_vol_ax.set_xticklabels([pd.Timestamp(f.datetime.iloc[i]).strftime("%m-%d") for i in ticks], fontsize=5.5)
+            f_vol_ax.tick_params(axis="x", pad=1)
+            f_ax.set_title(f"近3个月15分钟K线（{f.datetime.min():%Y-%m-%d}至{f.datetime.max():%Y-%m-%d}）", loc="left", fontsize=8.8, pad=2)
+            f_ax.legend(loc="upper left", ncol=7, fontsize=5.7, frameon=False, handlelength=1.1)
+        f_ax.grid(axis="y", color="#d9dfe5", lw=0.4)
+        f_ax.spines[["top", "right"]].set_visible(False); f_vol_ax.spines[["top", "right"]].set_visible(False)
+        f_ax.tick_params(axis="y", labelsize=6); f_vol_ax.tick_params(axis="y", labelsize=5)
+        f_vol_ax.set_ylabel("成交量（股）", fontsize=6)
+        quality_note = f"；1分钟量能软质量标记{quality_flag_count}条" if quality_flag_count else ""
+        fig.suptitle(f"{ts_code} {name}   5日1分钟分时 + 3个月15分钟K线   截止 {end_date}{quality_note}",
+                     x=0.5, y=0.995, fontsize=10)
+        fig.subplots_adjust(left=0.055, right=0.99, top=0.94, bottom=0.13)
+        fig.savefig(path, format="jpeg", dpi=100, pil_kwargs={"quality": 86, "optimize": True})
+        plt.close(fig)
+        return path
