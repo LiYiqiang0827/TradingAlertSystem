@@ -1,0 +1,7 @@
+.venv/
+__pycache__/
+*.py[cod]
+.DS_Store
+offlineAlertSystem/watchlist/watchlist_*.csv
+offlineAlertSystem/alert_zt/output/*
+!offlineAlertSystem/alert_zt/output/.gitkeep
