@@ -10,6 +10,7 @@ from pathlib import Path
 import re
 import sys
 import subprocess
+import os
 
 import pandas as pd
 
@@ -25,6 +26,9 @@ from plot.KlinePlot import _prepare
 
 WATCHLIST_DIR = OFFLINE_ROOT / "watchlist"
 OUTPUT_ROOT = OFFLINE_ROOT / "alert_zt" / "output"
+TDM_ROOT = Path.home() / "TradingDataManager"
+TDM_ONE_MIN_SERVICE = TDM_ROOT / "offlineDataManager" / "scripts" / "service" / "service_oneMinute.py"
+TDM_PYTHON = TDM_ROOT / ".venv" / "bin" / "python"
 STATUS_RE = re.compile(r"^(\d+)連板$")
 
 
@@ -165,6 +169,97 @@ def fetch_code_batches(provider, codes: list[str], **kwargs) -> pd.DataFrame:
     return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
 
 
+def one_minute_coverage_gaps(
+    daily: pd.DataFrame, minute: pd.DataFrame, dates: list[str], *, bars_per_session: int = 240,
+) -> tuple[dict[str, list[str]], dict]:
+    """Find candidate stock-days whose canonical 1-minute bars are incomplete."""
+    date_set = set(dates)
+    expected: set[tuple[str, str]] = set()
+    if not daily.empty and {"date", "ts_code"}.issubset(daily.columns):
+        recent = daily[daily.date.dt.strftime("%Y%m%d").isin(date_set)]
+        expected = {
+            (row.date.strftime("%Y%m%d"), str(row.ts_code).upper())
+            for row in recent[["date", "ts_code"]].itertuples(index=False)
+        }
+    counts: dict[tuple[str, str], int] = {}
+    if not minute.empty and {"date", "ts_code"}.issubset(minute.columns):
+        recent_minute = minute[minute.date.dt.strftime("%Y%m%d").isin(date_set)]
+        counts = {
+            (day, str(code).upper()): int(count)
+            for (day, code), count in recent_minute.assign(
+                _trade_date=recent_minute.date.dt.strftime("%Y%m%d")
+            ).groupby(["_trade_date", "ts_code"], sort=False).size().items()
+        }
+    gaps: dict[str, list[str]] = {}
+    missing_details = []
+    for day, code in sorted(expected):
+        bars = counts.get((day, code), 0)
+        if bars < bars_per_session:
+            gaps.setdefault(day, []).append(code)
+            missing_details.append({"trade_date": day, "ts_code": code, "bars": bars})
+    complete_pairs = len(expected) - len(missing_details)
+    return gaps, {
+        "expected_stock_days": len(expected),
+        "complete_stock_days": complete_pairs,
+        "missing_stock_days": len(missing_details),
+        "required_bars_per_stock_day": bars_per_session,
+        "missing_details": missing_details,
+    }
+
+
+def repair_one_minute_gaps(gaps: dict[str, list[str]]) -> dict:
+    """Use TradingDataManager's TDX service to repair only missing stocks/dates."""
+    if not gaps:
+        return {"attempted": False, "status": "not_needed", "dates": []}
+    if not TDM_PYTHON.is_file() or not TDM_ONE_MIN_SERVICE.is_file():
+        return {
+            "attempted": False, "status": "unavailable",
+            "error": f"TradingDataManager minute service or Python missing under {TDM_ROOT}",
+            "dates": sorted(gaps),
+        }
+    env = os.environ.copy()
+    extra_path = [str(TDM_ROOT), str(TDM_ROOT / "offlineDataManager" / "scripts")]
+    env["PYTHONPATH"] = ":".join(extra_path + ([env["PYTHONPATH"]] if env.get("PYTHONPATH") else []))
+    results = []
+    for day, codes in sorted(gaps.items()):
+        command = [
+            str(TDM_PYTHON), str(TDM_ONE_MIN_SERVICE), "--trade-date", day,
+            "--ts-codes", ",".join(sorted(set(codes))), "--force", "--merge-existing",
+        ]
+        try:
+            result = subprocess.run(
+                command, cwd=TDM_ROOT, env=env, text=True, capture_output=True,
+                check=False, timeout=900,
+            )
+            output = (result.stdout or "") + (result.stderr or "")
+            results.append({
+                "trade_date": day, "requested_stock_count": len(set(codes)),
+                "returncode": result.returncode,
+                "status": "command_succeeded" if result.returncode == 0 else "failed",
+                "log_tail": output[-2000:],
+            })
+        except subprocess.TimeoutExpired as exc:
+            output = exc.stdout or ""
+            if isinstance(output, bytes):
+                output = output.decode("utf-8", errors="replace")
+            results.append({
+                "trade_date": day, "requested_stock_count": len(set(codes)),
+                "returncode": None, "status": "timeout", "log_tail": str(output)[-2000:],
+            })
+        except OSError as exc:
+            results.append({
+                "trade_date": day, "requested_stock_count": len(set(codes)),
+                "returncode": None, "status": "failed", "log_tail": str(exc),
+            })
+        print(f"  TradingDataManager oneMin {day}: {results[-1]['status']} "
+              f"({len(set(codes))} stocks)", flush=True)
+    return {
+        "attempted": True,
+        "status": "command_succeeded" if all(item["status"] == "command_succeeded" for item in results) else "incomplete",
+        "dates": results,
+    }
+
+
 def replace_raw_volume(adjusted: pd.DataFrame, raw: pd.DataFrame) -> pd.DataFrame:
     if adjusted.empty or raw.empty:
         return adjusted
@@ -246,8 +341,18 @@ def generate(anchor_override: str | None = None, output_root: Path = OUTPUT_ROOT
     monthly_adj = _prepare(replace_raw_volume(monthly_adj, monthly_raw))
     fifteen_all = _prepare(fifteen_raw, minute=True)
     minute_all = _prepare(minute_recent, minute=True)
-    print("已读取行情：日线%d 周线%d 月线%d 15分钟%d 1分钟%d" %
-          (len(daily_adj), len(weekly_adj), len(monthly_adj), len(fifteen_all), len(minute_all)), flush=True)
+    minute_gaps, minute_coverage = one_minute_coverage_gaps(daily_adj, minute_all, rules["date5"])
+    minute_repair = repair_one_minute_gaps(minute_gaps)
+    if minute_repair["attempted"]:
+        minute_recent = fetch_code_batches(get_oneMin, codes, start_date=sessions[-5], end_date=anchor)
+        minute_all = _prepare(minute_recent, minute=True)
+        minute_gaps, minute_coverage = one_minute_coverage_gaps(daily_adj, minute_all, rules["date5"])
+    minute_quality = pd.concat([
+        get_oneMin_quality(trade_date=day, ts_codes=codes) for day in sessions[-5:]
+    ], ignore_index=True)
+    print("已读取行情：日线%d 周线%d 月线%d 15分钟%d 1分钟%d；1分钟完整覆盖%d/%d股日" %
+          (len(daily_adj), len(weekly_adj), len(monthly_adj), len(fifteen_all), len(minute_all),
+           minute_coverage["complete_stock_days"], minute_coverage["expected_stock_days"]), flush=True)
 
     chart_kpl_start = daily_visible_start.strftime("%Y%m%d")
     kpl_history = get_kpl_list(start_date=chart_kpl_start, end_date=anchor,
@@ -255,14 +360,8 @@ def generate(anchor_override: str | None = None, output_root: Path = OUTPUT_ROOT
     kpl_history["trade_date"] = kpl_history.trade_date.astype(str)
     kpl_history["ts_code"] = kpl_history.ts_code.astype(str)
     event_map = {code: sorted(set(g.trade_date)) for code, g in kpl_history.groupby("ts_code")}
-    sessions5 = rules["date5"]
-    if not minute_all.empty:
-        intraday_dates = sorted(set(minute_all.date.dt.strftime("%Y%m%d")))
-        actual5 = [d for d in intraday_dates if d <= anchor][-5:]
-        if len(actual5) < 5:
-            actual5 = sessions5
-    else:
-        actual5 = sessions5
+    # Keep the requested exchange sessions visible even when 1-minute bars remain missing.
+    actual5 = rules["date5"]
     report_dir = output_root / anchor
     report_dir.mkdir(parents=True, exist_ok=True)
     data_dir = report_dir / "_chart_data"
@@ -271,10 +370,10 @@ def generate(anchor_override: str | None = None, output_root: Path = OUTPUT_ROOT
                         ("monthly", monthly_adj), ("fifteen", fifteen_all),
                         ("one_min", minute_all), ("kpl_history", kpl_history)):
         frame.to_csv(data_dir / f"{name}.csv", index=False)
-    intraday_dates = sorted(set(minute_all.date.dt.strftime("%Y%m%d"))) if not minute_all.empty else []
-    actual5 = [d for d in intraday_dates if d <= anchor][-5:] or rules["date5"]
-    minute_coverage = {day: int(minute_all.loc[minute_all.date.eq(pd.Timestamp(day)), "ts_code"].nunique())
-                       for day in rules["date5"]}
+    minute_stock_coverage = {
+        day: int(minute_all.loc[minute_all.date.eq(pd.Timestamp(day)), "ts_code"].nunique())
+        for day in rules["date5"]
+    }
     theme_rows = sorted(rules["theme_heat"].items(), key=lambda x: (-x[1], x[0]))
     summary = {
         "anchor_date": anchor, "selection_trading_dates_20": sessions,
@@ -288,8 +387,10 @@ def generate(anchor_override: str | None = None, output_root: Path = OUTPUT_ROOT
         "theme_assignment": "按榜单日KPL theme首项归组；榜单日无记录时用最近一次涨停记录theme首项；题材热度按榜单日全市场KPL涨停股票计数",
         "sort_order": "题材当日涨停家数降序；题材内近20交易日涨停次数降序、最近涨停日优先、封板时点升序",
         "importance_rule": "基础1分；近5日有涨停+1；近20日有连续2板+1；近5日涨停至少2次或最高连续3板+1；题材当日涨停不少于5只+1；上限5。仅为可解释的观察优先级，不代表预测或买卖建议。",
-        "intraday_source_note": (f"上图：数据库canonical TDX 1分钟OHLC，近5日{len(minute_all):,}根、覆盖{minute_all.ts_code.nunique() if not minute_all.empty else 0}/{len(codes)}只候选股；逐日覆盖{min(minute_coverage.values()) if minute_coverage else 0}至{max(minute_coverage.values()) if minute_coverage else 0}只（缺席代码当日均无日线）。下图：本地近3个月15分钟K线。动态MA5/10/20按前N-1个已完成交易日收盘价与当前分钟收盘价计算。质量sidecar含{len(minute_quality)}条成交额非零但成交量为零的软标记，成交量保留库内值。"),
+        "intraday_source_note": (f"上图：数据库canonical TDX 1分钟OHLC，近5日{len(minute_all):,}根；完整覆盖{minute_coverage['complete_stock_days']}/{minute_coverage['expected_stock_days']}个有日线的股票日，要求每只每天240根。补数状态：{minute_repair['status']}；仍缺{minute_coverage['missing_stock_days']}个股票日，详见manifest。下图：本地近3个月15分钟K线仅作背景参考，不替代缺失的一分钟数据。逐日一分钟股票覆盖：{minute_stock_coverage}。动态MA5/10/20按前N-1个已完成交易日收盘价与当前分钟收盘价计算。质量sidecar含{len(minute_quality)}条成交额非零但成交量为零的软标记，成交量保留库内值。"),
         "data_source": "coreClient.data_provider; get_oneMin reads canonical one-minute OHLC Parquet (TDX source boundary from 2026-05-07); get_fifteenMin reads offline DuckDB; source=database_only for daily/weekly/monthly/KPL/tradecal",
+        "one_min_coverage": minute_coverage,
+        "one_min_repair": minute_repair,
         "one_min_quality_flags": int(len(minute_quality)),
         "one_min_quality_flags_by_stock": (minute_quality.groupby("ts_code").size().astype(int).to_dict() if not minute_quality.empty and "ts_code" in minute_quality.columns else {}),
         "data_limits": {"kpl_latest_date": anchor,

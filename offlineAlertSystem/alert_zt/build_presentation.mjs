@@ -95,7 +95,7 @@ for(let i=0;i<candidates.length;i++){
 
   const s2=newSlide(`${String(i+1).padStart(3,'0')}  ${header}`,'stock-intraday',notes);
   text(s2,details,{left:40,top:73,width:1518,height:36},24,accent,true);
-  text(s2,`上：5日1分钟分时（含日内均价、动态MA5/10/20和成交量）；下：3个月15分钟K线。交易日：${summary.intraday_trading_dates_5.map(fmt).join('、')}`,
+  text(s2,`上：5日1分钟分时（含日内均价、动态MA5/10/20和成交量）；下：3个月15分钟K线（背景参考，不替代缺失的一分钟）。交易日：${summary.intraday_trading_dates_5.map(fmt).join('、')}`,
     {left:42,top:108,width:1510,height:38},18,muted);
   await addChart(s2,path.join(dataDir,r.intraday_image),`${r.name}最近5日分时与成交量`,
     {left:32,top:151,width:1536,height:700});
