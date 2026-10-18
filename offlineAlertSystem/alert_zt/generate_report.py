@@ -145,6 +145,7 @@ def make_candidates(kpl: pd.DataFrame, sessions: list[str], anchor: str) -> tupl
             "limit_up_count_5d": count5, "limit_up_count_20d": count20,
             "max_consecutive_boards_20d": max_board,
             "latest_limit_up_date": latest_date, "latest_limit_up_time": latest_time,
+            "latest_limit_up_status": str(newest.get("status", "")),
             "limit_up_dates_20d": hit_dates,
             "anchor_status": (str(anchor_rows.iloc[0].get("status", "")) if not anchor_rows.empty else ""),
             "anchor_date": anchor,
