@@ -5,3 +5,11 @@ __pycache__/
 offlineAlertSystem/watchlist/watchlist_*.csv
 offlineAlertSystem/alert_zt/output/*
 !offlineAlertSystem/alert_zt/output/.gitkeep
+
+# TradingAlert dashboard runtime artifacts
+limitup-dashboard/.runtime/
+limitup-dashboard/__pycache__/
+limitup-dashboard/*.bak-*
+limitup-dashboard/server.log
+limitup-dashboard/server.pid
+limitup-dashboard/cache/
