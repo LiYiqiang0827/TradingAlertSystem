@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Local read-only API for the TradingAlert limit-up dashboard prototype."""
 from __future__ import annotations
-import json, os, re, sqlite3, sys, datetime, traceback, calendar, bisect
+import json, os, re, sqlite3, sys, datetime, traceback, calendar, bisect, math, hashlib
+from functools import lru_cache
 from http.server import ThreadingHTTPServer, SimpleHTTPRequestHandler
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -14,6 +15,246 @@ BASIC_DB=DBROOT/"offline"/"db_cn_basic.db"
 WEBROOT=Path(__file__).resolve().parent
 sys.path.insert(0,str(TDM)); sys.path.insert(0,str(TDM/"offlineDataManager"/"scripts"))
 from coreClient.data_provider import get_day,get_oneMin,get_fifteenMin,get_index_daily,get_index_oneMin,get_index_fifteenMin
+from coreClient.index_period import IndexPeriodStore, overlay_index_period
+
+
+# Trading state follows the exchange calendar and Shanghai wall clock, not review date.
+def live_market_status():
+    from zoneinfo import ZoneInfo
+    now=datetime.datetime.now(ZoneInfo("Asia/Shanghai"))
+    day=now.strftime("%Y%m%d")
+    calendar_known=False
+    is_open=False
+    try:
+        with sqlite3.connect(f"file:{BASIC_DB}?mode=ro",uri=True,timeout=2) as c:
+            row=c.execute("SELECT is_open FROM tbl_cn_tradecal WHERE exchange='SSE' AND cal_date=?",(day,)).fetchone()
+        calendar_known=row is not None
+        is_open=bool(row and row[0]==1)
+    except sqlite3.Error:
+        pass
+    minute=now.hour*60+now.minute
+    phase="closed"
+    if is_open:
+        if 9*60+15<=minute<11*60+30 or 13*60<=minute<15*60:
+            phase="trading"
+        elif 11*60+30<=minute<13*60:
+            phase="recess"
+    return {"date":day,"serverTime":now.isoformat(),"phase":phase,
+            "label":{"trading":"交易中","recess":"休盘中","closed":"闭市中"}[phase],
+            "defaultEnabled":phase in ("trading","recess"),"calendarKnown":calendar_known}
+
+
+def live_monitor_data():
+    # Read the committed full snapshots, including valid zero-stock snapshots.
+    # Timeline timestamps identify the snapshot day; yesterday's data is never shown as today.
+    import redis
+    from zoneinfo import ZoneInfo
+    status=live_market_status()
+    client=redis.Redis(host="127.0.0.1",port=6380,db=0,decode_responses=True,
+                       socket_connect_timeout=1,socket_timeout=2)
+    client.ping()
+    pools={}
+    for kind in ("zt","break"):
+        latest=client.zrevrange(f"online:{kind}:timeline",0,0,withscores=True)
+        pool={"count":None,"updatedAt":None,"available":False}
+        if latest:
+            key,stamp=latest[0]
+            if stamp>1e12: stamp/=1000
+            when=datetime.datetime.fromtimestamp(stamp,ZoneInfo("Asia/Shanghai"))
+            pool["updatedAt"]=when.isoformat()
+            # Missing archive is unavailable, distinct from a snapshot containing zero stocks.
+            if when.strftime("%Y%m%d")==status["date"] and client.exists(key):
+                count=client.hlen(key)
+                pool.update(count=count,available=True)
+        pools[kind]=pool
+    return {"status":status,"pools":pools}
+
+LIVE_INDEX_CATALOG=(("000001.SH","上证指数"),("399001.SZ","深证成指"),
+                    ("399006.SZ","创业板指"),("000688.SH","科创50"),
+                    ("000300.SH","沪深300"),("000016.SH","上证50"),
+                    ("000905.SH","中证500"),("000852.SH","中证1000"))
+
+
+def fit_live_index_ticks(raw_ticks,day,now):
+    from zoneinfo import ZoneInfo
+    zone=ZoneInfo("Asia/Shanghai")
+    def number(value):
+        try:
+            result=float(value)
+            return result if math.isfinite(result) else None
+        except (TypeError,ValueError): return None
+    ticks={}
+    for raw,score in raw_ticks:
+        try:
+            row=json.loads(raw)
+            stamp=number(row.get("snapshot_index_timestamp") or row.get("snapshot_timestamp"))
+            stamp=(stamp/1000 if stamp and stamp>1e12 else stamp) or score
+            when=datetime.datetime.fromtimestamp(stamp,zone)
+            minute=when.hour*60+when.minute
+            price=number(row.get("last_price"))
+            if when.strftime("%Y%m%d")!=day or stamp>now.timestamp()+2 or not price or price<=0: continue
+            if not (9*60+25<=minute<=11*60+30 or 13*60<=minute<=15*60): continue
+            ticks[stamp]=(when,row)
+        except (ValueError,TypeError,OverflowError,json.JSONDecodeError): continue
+    if not ticks: return {"oneMin":[],"today":None,"quote":None,"tickCount":0}
+    bars={};previous_volume=previous_turnover=0;previous_high=previous_low=None
+    for stamp,(when,row) in sorted(ticks.items()):
+        price=number(row.get("last_price"));high=number(row.get("high_price"));low=number(row.get("low_price"))
+        # Opening auction observations join the first 09:30 bar, with no synthetic empty bars.
+        bucket=when.replace(second=0,microsecond=0)
+        if bucket.hour==9 and bucket.minute<30: bucket=bucket.replace(minute=30)
+        key=int(bucket.timestamp()*1000)
+        bar=bars.setdefault(key,{"timestamp":key,"open":price,"high":price,"low":price,"close":price,"volume":0,"turnover":0})
+        bar["high"]=max(bar["high"],price);bar["low"]=min(bar["low"],price);bar["close"]=price
+        # A newly reported daily extreme belongs to this observed minute; unchanged daily
+        # extremes must never be copied into every minute's high/low.
+        if high is not None and previous_high is not None and high>previous_high: bar["high"]=max(bar["high"],high)
+        if low is not None and previous_low is not None and low<previous_low: bar["low"]=min(bar["low"],low)
+        for field,previous,target in (("volume",previous_volume,"volume"),("turnover",previous_turnover,"turnover")):
+            cumulative=number(row.get(field))
+            if cumulative is not None and cumulative>=previous: bar[target]+=cumulative-previous
+        previous_volume=max(previous_volume,number(row.get("volume")) or 0)
+        previous_turnover=max(previous_turnover,number(row.get("turnover")) or 0)
+        previous_high=high if high is not None else previous_high
+        previous_low=low if low is not None else previous_low
+    stamp,(when,latest)=max(ticks.items())
+    close=number(latest.get("last_price"));open_price=number(latest.get("open_price"))
+    high=number(latest.get("high_price"));low=number(latest.get("low_price"))
+    today=None
+    if all(value is not None and value>0 for value in (open_price,high,low,close)):
+        today={"timestamp":int(datetime.datetime.strptime(day,"%Y%m%d").replace(tzinfo=datetime.timezone.utc).timestamp()*1000),
+               "open":open_price,"high":max(high,open_price,close),"low":min(low,open_price,close),"close":close,
+               "volume":number(latest.get("volume")) or 0,"turnover":number(latest.get("turnover")) or 0}
+    return {"oneMin":list(bars.values()),"today":today,"tickCount":len(ticks),
+            "quote":{"price":close,"prevClose":number(latest.get("prev_price")),"pct":number(latest.get("price_change_ratio_pct")),
+                     "time":when.isoformat(),"ageSeconds":max(0,int(now.timestamp()-stamp))}}
+
+
+def valid_live_ohlc(bar):
+    # Index inception/base-point rows can contain only a close (e.g. STAR50 2019-12-31).
+    # Such rows are not tradable OHLC bars; never invent their open/high/low.
+    return all(isinstance(bar.get(key),(int,float)) and math.isfinite(bar[key]) and bar[key]>0
+               for key in ("open","high","low","close"))
+
+
+@lru_cache(maxsize=48)
+def live_index_history(code,day,kind,data_version=""):
+    # The revision salts the process cache, including repairs to earlier sessions.
+    from zoneinfo import ZoneInfo
+    if kind=="fifteenMin":
+        database=DBROOT/"offline"/"db_cn_index_minute.db"
+        with sqlite3.connect(f"file:{database}?mode=ro",uri=True,timeout=3) as c:
+            rows=c.execute("SELECT datetime,open,high,low,close,amount FROM tbl_cn_index_minute "
+                "WHERE ts_code=? AND period=15 AND trade_date<? AND substr(datetime,12,8)<='15:00:00' "
+                "ORDER BY datetime DESC LIMIT 128",(code,day)).fetchall()
+        return [{"timestamp":int(datetime.datetime.fromisoformat(row[0]).replace(tzinfo=ZoneInfo("Asia/Shanghai")).timestamp()*1000),
+                 "open":row[1],"high":row[2],"low":row[3],"close":row[4],"volume":float(row[5] or 0)} for row in reversed(rows)]
+    database=DBROOT/"offline"/"db_cn_index.db"
+    with sqlite3.connect(f"file:{database}?mode=ro",uri=True,timeout=3) as c:
+        rows=c.execute("SELECT trade_date,open,high,low,close,vol FROM tbl_cn_index_daily "
+                       "WHERE ts_code=? AND trade_date<? ORDER BY trade_date DESC LIMIT 2400",(code,day)).fetchall()
+    return [{"timestamp":int(datetime.datetime.strptime(row[0],"%Y%m%d").replace(tzinfo=datetime.timezone.utc).timestamp()*1000),
+             "open":row[1],"high":row[2],"low":row[3],"close":row[4],"volume":float(row[5] or 0)*100} for row in reversed(rows)
+            if valid_live_ohlc(dict(zip(("open","high","low","close"),row[1:5])))]
+
+
+def aggregate_live_bars(bars,period):
+    from zoneinfo import ZoneInfo
+    result={}
+    for bar in bars:
+        if not valid_live_ohlc(bar): continue
+        stamp=bar["timestamp"]
+        date=datetime.datetime.fromtimestamp(stamp/1000,datetime.timezone.utc)
+        if period=="fifteenMin":
+            local=date.astimezone(ZoneInfo("Asia/Shanghai"));minute=local.hour*60+local.minute
+            start=9*60+30 if minute<=11*60+30 else 13*60
+            offset=max(0,min(119,minute-start))
+            end=start+(offset//15+1)*15
+            anchor=local.replace(hour=end//60,minute=end%60,second=0,microsecond=0)
+            key=int(anchor.timestamp()*1000)
+        elif period=="weekly": key=date.date()-datetime.timedelta(days=date.weekday())
+        else: key=(date.year,date.month)
+        if key not in result:
+            result[key]={**bar,"timestamp":key if period=="fifteenMin" else stamp,"volume":0}
+        target=result[key];target["timestamp"]=key if period=="fifteenMin" else stamp
+        target["high"]=max(target["high"],bar["high"]);target["low"]=min(target["low"],bar["low"])
+        target["close"]=bar["close"];target["volume"]+=float(bar.get("turnover",bar.get("volume",0)) or 0) if period=="fifteenMin" else float(bar.get("volume",0) or 0)
+    return list(result.values())
+
+
+def live_bar_moving_averages(bars):
+    # Calculate before trimming the visible window so its first bars have real history.
+    sums=[0.0];valid=[0]
+    for bar in bars:
+        value=bar.get("close")
+        okay=isinstance(value,(int,float)) and math.isfinite(value) and value>0
+        sums.append(sums[-1]+(value if okay else 0));valid.append(valid[-1]+int(okay))
+    result=[]
+    for index,bar in enumerate(bars,1):
+        averages={str(period):(sums[index]-sums[index-period])/period
+                  for period in (5,10,20,30) if index>=period and valid[index]-valid[index-period]==period}
+        result.append({**bar,"ma":averages})
+    return result
+
+
+def live_preaggregated_index_bars(code,day,period,today,quote):
+    stored=IndexPeriodStore().as_of_rows(code,period,day,limit=100)
+    tick=None
+    if today:
+        tick={"ts_code":code,"trade_date":day,**{key:today[key] for key in ("open","high","low","close")},
+              "vol":today["volume"]/100,"amount":today["turnover"]/1000,
+              "pre_close":quote.get("prevClose") if quote else None}
+    rows=overlay_index_period(stored,tick,period)
+    return [{"timestamp":int(datetime.datetime.strptime(row["trade_date"],"%Y%m%d").replace(tzinfo=datetime.timezone.utc).timestamp()*1000),
+             **{key:row[key] for key in ("open","high","low","close")},
+             "volume":row["vol"]*100,"turnover":row["amount"]*1000} for row in rows]
+
+
+def index_data_version():
+    # SQLite data can still be in WAL, so the main file alone is not a revision.
+    files=[]
+    for name in ("db_cn_index.db","db_cn_index_minute.db"):
+        for suffix in ("","-wal"):
+            path=DBROOT/"offline"/(name+suffix)
+            try:
+                stat=path.stat();files.append((name+suffix,stat.st_size,stat.st_mtime_ns) if not suffix or stat.st_size>32 else (name+suffix,None,None))
+            except FileNotFoundError: files.append((name+suffix,None,None))
+    revision=hashlib.sha256(json.dumps(files,separators=(",",":")).encode()).hexdigest()[:24]
+    return {"indexDataVersion":revision,"indexSeriesVersion":5,
+            "indexVersionAt":datetime.datetime.now(datetime.timezone.utc).timestamp()}
+
+
+def live_indices_data(group=0,period="oneMin"):
+    import redis
+    from zoneinfo import ZoneInfo
+    version=index_data_version()
+    status=live_market_status();day=status["date"]
+    now=datetime.datetime.fromisoformat(status["serverTime"])
+    start=datetime.datetime.strptime(day,"%Y%m%d").replace(tzinfo=ZoneInfo("Asia/Shanghai")).timestamp()
+    client=redis.Redis(host="127.0.0.1",port=6380,db=0,decode_responses=True,
+                       socket_connect_timeout=1,socket_timeout=2)
+    pipe=client.pipeline(transaction=False)
+    catalog=LIVE_INDEX_CATALOG[group*4:group*4+4]
+    for code,_ in catalog:
+        pipe.zrangebyscore(f"online:snapshot_index:window:{code}",start,now.timestamp(),withscores=True)
+    raw_series=pipe.execute();items=[]
+    for (code,name),raw_ticks in zip(catalog,raw_series):
+        data=fit_live_index_ticks(raw_ticks,day,now)
+        series=data["oneMin"];series_error=None
+        if period!="oneMin":
+            try:
+                if period in ("weekly","monthly"):
+                    series=live_bar_moving_averages(live_preaggregated_index_bars(code,day,period,data["today"],data["quote"]))[-60:]
+                else:
+                    history=live_index_history(code,day,"fifteenMin" if period=="fifteenMin" else "daily",version["indexDataVersion"])
+                    if period=="fifteenMin": series=live_bar_moving_averages(history+aggregate_live_bars(data["oneMin"],period))[-64:]
+                    else: series=live_bar_moving_averages(history+([data["today"]] if data["today"] else []))[-60:]
+            except (sqlite3.Error,ValueError,TypeError,OverflowError):
+                traceback.print_exc()
+                series=[];series_error="该周期历史数据暂不可用"
+        items.append({"code":code,"name":name,**data,"series":series,"seriesError":series_error})
+    return {**version,"status":status,"indices":items,"source":"redis_snapshot_index","samplingSeconds":30,"period":period,"group":group}
+
 
 class Cache:
     """Use Redis if reachable; keep a persistent SQLite cache as the fallback."""
@@ -1111,6 +1352,24 @@ class Handler(SimpleHTTPRequestHandler):
     def do_GET(self):
         u=urlparse(self.path); q=parse_qs(u.query)
         try:
+            if u.path=="/api/index-version":
+                return self.send_json(index_data_version())
+            if u.path=="/api/live-status":
+                return self.send_json(live_market_status())
+            if u.path=="/api/live-indices":
+                try:
+                    group=q.get("group",["0"])[0];period=q.get("period",["oneMin"])[0]
+                    if group not in ("0","1") or period not in ("oneMin","fifteenMin","daily","weekly","monthly"):
+                        return self.send_json({"error":"指数分组或周期无效"},400)
+                    return self.send_json(live_indices_data(int(group),period))
+                except Exception:
+                    traceback.print_exc()
+                    return self.send_json({"error":"指数实时数据暂不可用，请稍后重试"},503)
+            if u.path=="/api/live":
+                try:
+                    return self.send_json(live_monitor_data())
+                except Exception:
+                    return self.send_json({"error":"实时数据暂不可用，请稍后重试"},503)
             if u.path=="/api/dates":
                 return self.send_json({"dates":market_data_dates()})
             if u.path=="/api/topic-dates":
@@ -1319,7 +1578,8 @@ class Handler(SimpleHTTPRequestHandler):
                 code=q.get("code",[""])[0].upper(); date=safe_date(q.get("date",[""])[0])
                 index_names={"000001.SH":"上证指数","399001.SZ":"深证成指","399006.SZ":"创业板指","000688.SH":"科创50","000300.SH":"沪深300","000016.SH":"上证50","000905.SH":"中证500","000852.SH":"中证1000"}
                 if code not in index_names: raise ValueError("指数代码无效")
-                key=f"index-series:v3-native:{code}:{date}"
+                version=index_data_version()
+                key=f"index-series:v5:{version['indexDataVersion']}:{code}:{date}"
                 def load_index():
                     import pandas as pd
                     end=datetime.datetime.strptime(date,"%Y%m%d").date()
@@ -1337,8 +1597,9 @@ class Handler(SimpleHTTPRequestHandler):
                     daily_rows=daily_frame[daily_frame["trade_date"].astype(str)>=daily_start] if not daily_frame.empty else daily_frame
                     weekly_rows=daily_frame[daily_frame["trade_date"].astype(str)>=weekly_start] if not daily_frame.empty else daily_frame
                     daily=compact(daily_rows,"trade_date")
-                    weekly=aggregate_index_daily(weekly_rows,"W-FRI")
-                    monthly=aggregate_index_daily(daily_frame,"M")
+                    period_store=IndexPeriodStore()
+                    weekly=compact(pd.DataFrame(period_store.as_of_rows(code,"weekly",date,start_date=weekly_start)),"trade_date")
+                    monthly=compact(pd.DataFrame(period_store.as_of_rows(code,"monthly",date)),"trade_date")
                     minute_start=(end-datetime.timedelta(days=14)).strftime("%Y%m%d")
                     minute_frame=pd.DataFrame()
                     minute_error=None
@@ -1374,8 +1635,9 @@ class Handler(SimpleHTTPRequestHandler):
                     fifteen=compact(fifteen_frame,"datetime") if not fifteen_frame.empty else []
                     minute_dates=sorted(minute_frame["trade_date"].astype(str).unique()) if not minute_frame.empty and "trade_date" in minute_frame.columns else []
                     fifteen_dates=sorted(fifteen_frame["trade_date"].astype(str).unique()) if not fifteen_frame.empty else []
-                    return {"code":code,"name":index_names[code],"date":date,"daily":daily,"weekly":weekly,"monthly":monthly,"oneMin":one_min,"fifteenMin":fifteen,"coverage":{"oneMinBars":len(one_min),"oneMinDays":len(minute_dates),"oneMinStart":minute_dates[0] if minute_dates else None,"oneMinEnd":minute_dates[-1] if minute_dates else None,"fifteenDays":len(fifteen_dates),"fifteenStart":fifteen_dates[0] if fifteen_dates else None,"fifteenEnd":fifteen_dates[-1] if fifteen_dates else None,"oneMinError":minute_error,"fifteenError":fifteen_error},"sources":{"daily":"index_daily_database","minute":"tdx_native_index_1min","fifteenMin":"tdx_native_index_15min","minuteVolumeMetric":"source_turnover_yuan"}}
-                return self.send_json(cached_series(key,load_index,300 if date==datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=8))).strftime("%Y%m%d") else 7*24*3600))
+                    return {"code":code,"name":index_names[code],"date":date,"daily":daily,"weekly":weekly,"monthly":monthly,"oneMin":one_min,"fifteenMin":fifteen,"coverage":{"oneMinBars":len(one_min),"oneMinDays":len(minute_dates),"oneMinStart":minute_dates[0] if minute_dates else None,"oneMinEnd":minute_dates[-1] if minute_dates else None,"fifteenDays":len(fifteen_dates),"fifteenStart":fifteen_dates[0] if fifteen_dates else None,"fifteenEnd":fifteen_dates[-1] if fifteen_dates else None,"oneMinError":minute_error,"fifteenError":fifteen_error},"sources":{"daily":"index_daily_database","weekly":"index_weekly_database","monthly":"index_monthly_database","minute":"tdx_native_index_1min","fifteenMin":"tdx_native_index_15min","minuteVolumeMetric":"source_turnover_yuan"}}
+                payload=cached_series(key,load_index,300 if date==datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=8))).strftime("%Y%m%d") else 7*24*3600)
+                return self.send_json({**payload,**version})
             if u.path=="/api/stock":
                 code=q.get("code",[""])[0]; date=safe_date(q.get("date",[""])[0]); latest=False
                 if not re.fullmatch(r"\d{6}\.(SH|SZ|BJ)",code): raise ValueError("股票代码无效")
