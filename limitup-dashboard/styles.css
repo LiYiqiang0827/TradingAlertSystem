@@ -421,4 +421,32 @@
 .unpromoted-board-theme{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:left;font:10px/18px var(--sans)}
 .unpromoted-board-change{min-width:44px;text-align:right;font:9px/18px var(--mono)}
 
-.broken-board-badge{background:#493a35;color:#e4a08c}
+:root{--broken-badge-background:#493a35}
+.broken-board-badge{background:var(--broken-badge-background);color:#e4a08c}
+
+.board-tier-promotion-rate{margin-left:2px;color:#879a8e;font-size:10px;font-weight:400;white-space:nowrap;}
+
+/* Share the former one-word-board slot with the earth-to-sky reversal card. */
+.special-board-cards{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.05fr);gap:10px;min-width:0;align-items:stretch}
+.special-board-cards>.metric-card{min-width:0;padding:15px 10px;overflow:hidden}
+.special-board-cards .metric-label{font-size:9px;line-height:1.45}
+.special-board-cards .oneword-theme-row{grid-template-columns:10px minmax(0,1fr) auto;gap:3px}
+.earth-sky-list{display:grid;gap:6px;margin-top:7px;max-height:116px;overflow:auto;scrollbar-width:thin}
+.earth-sky-row{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);align-items:center;gap:4px;font-size:clamp(8px,.65vw,10px);line-height:1.4}
+.earth-sky-name,.earth-sky-theme{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.earth-sky-name{padding:0;border:0;background:transparent;text-align:left;color:#39494b;font:inherit;font-weight:600}
+button.earth-sky-name{font:600 9px var(--sans);cursor:pointer}
+button.earth-sky-name:hover{color:var(--green);text-decoration:underline}
+.earth-sky-theme{font-size:8px;color:#85918d}
+@media(max-width:700px){.metric-grid>.limitup-trend-card,.metric-grid>.special-board-cards{grid-column:1/-1}.special-board-cards{gap:7px}.special-board-cards>.metric-card{padding:11px}.earth-sky-row{font-size:10px}.earth-sky-theme{font-size:9px}}
+
+/* Distinguish unpromoted stocks that touched the upper limit intraday. */
+.stock-table.outcome-table .touched-limit-unpromoted>.market-cap-badge{box-shadow:0 0 0 2px var(--broken-badge-background)}
+
+/* Compact independent reversal and board-strength labels beside the board count. */
+.board-traits{display:grid;grid-template-columns:repeat(2,30px);align-items:start;gap:2px;width:62px;min-width:62px}
+.board-traits .board-shape-badge{width:30px;min-width:0;height:16px;padding:0 2px;font-size:8px;line-height:16px;box-shadow:none}
+.board-shape-badge.earth-sky{background:#ead6cd;color:#8c3f2e}
+.board-shape-badge.near-earth-sky{background:#fff1d4;color:#926723}
+.board-shape-badge.weak-board{background:#eee5dd;color:#795438}
+.board-shape-badge.strong-board{background:#f9e3df;color:#b7473d}

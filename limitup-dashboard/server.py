@@ -3,6 +3,7 @@
 from __future__ import annotations
 import json, os, re, sqlite3, sys, datetime, traceback, calendar, bisect
 from http.server import ThreadingHTTPServer, SimpleHTTPRequestHandler
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs
 
@@ -225,6 +226,45 @@ def market_topics(date, report, pool):
     topics=sorted(grouped.values(),key=lambda item:(-len(item["stocks"]),item["name"]))
     return topics, len(fallback_codes), len(fallback_codes)+len(incomplete)
 
+def classify_limitup_traits(stock):
+    """Classify a sealed limit-up using same-day raw prices and final seal facts."""
+    def number(key):
+        try:
+            raw=stock.get(key)
+            if raw is None or isinstance(raw,bool): return None
+            value=Decimal(str(raw))
+            return value if value.is_finite() else None
+        except (InvalidOperation,ValueError,TypeError): return None
+    def same_price(a,b):
+        return a is not None and b is not None and abs(a-b)<Decimal("0.005")
+    def seal_seconds(value):
+        clock=str(value or "").strip()
+        if re.fullmatch(r"\d{5,6}",clock):
+            clock=clock.zfill(6); clock=f"{clock[:2]}:{clock[2:4]}:{clock[4:]}"
+        match=re.fullmatch(r"(\d{1,2}):(\d{2})(?::(\d{2}))?",clock)
+        if not match: return None
+        hour,minute,second=(int(part or 0) for part in match.groups())
+        return hour*3600+minute*60+second if 0<=hour<24 and 0<=minute<60 and 0<=second<60 else None
+    traits={"reversal_shape":None,"board_strength":None}
+    upper,lower,close,low,preclose=(number(key) for key in ("up_limit","down_limit","daily_close","daily_low","pre_close"))
+    if upper is None or upper<=0 or not same_price(close,upper): return traits
+    if lower is not None and upper>lower>0 and same_price(low,lower):
+        traits["reversal_shape"]="earth_sky"
+    elif low is not None and preclose is not None and preclose>0 and low*100<=preclose*93:
+        traits["reversal_shape"]="near_earth_sky"
+    if stock.get("board_shape")=="one_word":
+        traits["board_strength"]="strong"
+        return traits
+    openings=number("open_times")
+    if openings is not None and (openings<0 or openings!=openings.to_integral_value()): openings=None
+    last=seal_seconds(stock.get("last_time"))
+    if (openings is not None and openings>3) or (last is not None and last>14*3600):
+        traits["board_strength"]="weak"
+    elif openings is not None and openings<=1 and last is not None and last<10*3600+30*60:
+        traits["board_strength"]="strong"
+    return traits
+
+
 def attach_daily_prices(date, stocks, limit_status="U"):
     """Attach same-day unadjusted OHLC and free-float turnover fields."""
     codes=sorted({str(stock.get("ts_code") or "") for stock in stocks if stock.get("ts_code")})
@@ -239,8 +279,8 @@ def attach_daily_prices(date, stocks, limit_status="U"):
         try:
             placeholders=','.join('?' for _ in codes)
             with sqlite3.connect(f"file:{BASIC_DB}?mode=ro",uri=True,timeout=3) as c:
-                rows=c.execute(f"SELECT b.ts_code,b.turnover_rate_f,b.total_mv,b.circ_mv,b.volume_ratio,l.up_limit,d.pre_close,d.open,d.high,d.low,d.amount FROM tbl_cn_daily_basic b LEFT JOIN tbl_cn_stk_limit l ON l.trade_date=b.trade_date AND l.ts_code=b.ts_code LEFT JOIN tbl_cn_day d ON d.trade_date=b.trade_date AND d.ts_code=b.ts_code WHERE b.trade_date=? AND b.ts_code IN ({placeholders})",[date,*codes]).fetchall()
-            for code,turnover_rate_f,total_mv,circ_mv,volume_ratio,up_limit,pre_close,day_open,day_high,day_low,day_amount in rows:
+                rows=c.execute(f"SELECT b.ts_code,b.turnover_rate_f,b.total_mv,b.circ_mv,b.volume_ratio,l.up_limit,d.pre_close,d.open,d.high,d.low,d.amount,l.down_limit,d.close FROM tbl_cn_daily_basic b LEFT JOIN tbl_cn_stk_limit l ON l.trade_date=b.trade_date AND l.ts_code=b.ts_code LEFT JOIN tbl_cn_day d ON d.trade_date=b.trade_date AND d.ts_code=b.ts_code WHERE b.trade_date=? AND b.ts_code IN ({placeholders})",[date,*codes]).fetchall()
+            for code,turnover_rate_f,total_mv,circ_mv,volume_ratio,up_limit,pre_close,day_open,day_high,day_low,day_amount,down_limit,day_close in rows:
                 metrics=prices.setdefault(str(code),{})
                 metrics["free_float_turnover_rate"]=json_clean(turnover_rate_f)
                 metrics["daily_basic_total_mv"]=json_clean(total_mv)
@@ -251,6 +291,8 @@ def attach_daily_prices(date, stocks, limit_status="U"):
                     if value is not None:
                         metrics[key]=json_clean(value)
                 metrics["up_limit"]=json_clean(up_limit)
+                metrics["down_limit"]=json_clean(down_limit)
+                if day_close is not None: metrics["daily_close"]=json_clean(day_close)
                 if day_amount is not None:
                     metrics["daily_amount"]=json_clean(float(day_amount)*1000)  # tbl_cn_day.amount is in 1,000 CNY
         except Exception as exc:
@@ -322,6 +364,7 @@ def attach_daily_prices(date, stocks, limit_status="U"):
                 item["board_shape"]="t_shape"
         except (TypeError,ValueError):
             pass
+        item.update(classify_limitup_traits(item))
         enriched.append(item)
     return enriched
 
@@ -464,8 +507,8 @@ def kpl_pool(date):
             count=int(d.get("board_count") or 1)
             d["status"]=d.get("board_period") or ("首板" if count==1 else f"{count}连板")
             stocks[code]=d
-            if d.get("is_break") and not any(str(x.get("ts_code"))==code for x in broken):
-                broken.append({"ts_code":code,"name":d.get("name"),"theme":d.get("theme") or "","lu_desc":d.get("lu_desc") or "","status":"首板" if count==1 else f"{count}板","first_limit_time":d["lu_time"],"break_time":""})
+            # performance.is_break records an opened board, including resealed winners.
+            # Final failures are verified against the daily close below.
         if "tbl_cn_limit_list" in tables:
             rows=c.execute("SELECT ts_code,name,industry,close,pct_chg,amount,limit_amount,float_mv,total_mv,turnover_ratio,fd_amount,first_time,last_time,open_times,up_stat,limit_times FROM tbl_cn_limit_list WHERE trade_date=? AND \"limit\"='U' ORDER BY first_time",(date,)).fetchall()
             for r in rows:
@@ -479,8 +522,24 @@ def kpl_pool(date):
                 d["status"]=d.get("up_stat") or "暂无数据"; d["turnover_rate"]=d.get("turnover_ratio")
                 d["limit_order"]=d.get("fd_amount"); d["free_float"]=d.get("float_mv"); d["amount"]=d.get("amount")
                 d["open_time"]=""; stocks[code]=d
+        # KPL list can lag a day. The independent Z snapshot must still be read.
+        by_code={str(item["ts_code"]):item for item in broken}
+        if "tbl_cn_limit_list" in tables:
+            for row in c.execute("""SELECT ts_code,name,industry,first_time,last_time,open_times
+                FROM tbl_cn_limit_list WHERE trade_date=? AND "limit"='Z'""",(date,)):
+                raw=dict(row); code=str(raw["ts_code"])
+                item=by_code.setdefault(code,{"ts_code":code,"name":raw["name"],"theme":"","lu_desc":"","break_time":""})
+                perf=performance.get(code,{})
+                if perf.get("theme"): item["performance_theme"]=str(perf["theme"]).strip()
+                if perf.get("limit_reason"): item["performance_limit_reason"]=str(perf["limit_reason"]).strip()
+                item["industry"]=raw.get("industry") or ""
+                item["open_times"]=raw.get("open_times")
+                clock=str(raw.get("first_time") or "").strip()
+                if re.fullmatch(r"\d{1,6}",clock):
+                    clock=clock.zfill(6); clock=f"{clock[:2]}:{clock[2:4]}:{clock[4:6]}"
+                if not item.get("first_limit_time"): item["first_limit_time"]=clock
         values=list(stocks.values())
-        breaks=filter_unsealed_breaks(date,broken)
+        breaks=filter_unsealed_breaks(date,list(by_code.values()))
         return {"source":"KPL涨停名单 / 涨停表现 / 涨停列表","stocks":attach_daily_prices(date,values),
                 "break_stocks":attach_daily_prices(date,breaks,limit_status="Z")}
 
@@ -746,22 +805,39 @@ def cached_series(key, loader, ttl=7*24*3600):
         CACHE.set(key,value,ttl)
     return value
 
-def market_stats(date, topics):
+def is_closed_limit_up(row):
+    """Use unadjusted daily close and the exchange limit price for board counts."""
+    close, limit_price = row["close"], row["up_limit"]
+    return close is not None and limit_price is not None and float(limit_price)>0 and abs(float(close)-float(limit_price))<0.005
+
+
+def consecutive_board_history(rows, initial_counts=None):
+    """Count consecutive traded sessions; a suspended session adds no board and preserves the run."""
+    counts=dict(initial_counts or {}); by_day={}
+    for row in rows:
+        code=row["ts_code"]; day=str(row["trade_date"])
+        counts[code]=counts.get(code,0)+1 if is_closed_limit_up(row) else 0
+        if counts[code]: by_day.setdefault(day,{})[code]=counts[code]
+    return by_day
+
+
+def market_stats(date, topics, pool=None):
     """Compute daily rates and their yesterday-theme/today-theme/board breakdowns."""
     empty={"date":date,"previousDate":None,"touched":None,"sealed":None,"sealingRate":None,"returnDistributions":[],
            "limitUpHistory":[],
            "topicLimitUpHistory":{},
            "promoted":None,"previousFirstBoards":None,"promotionNumerator":None,"promotionDenominator":None,"promotionRate":None,"nonPromotedStocks":[],
-           "promotionThemes":[],"sealingThemes":[],"topicPromotionRates":{},"promotionBoards":[],"sealingBoards":[],
+           "promotionThemes":[],"sealingThemes":[],"topicPromotionRates":{},"promotionBoards":[],"sealingBoards":[],"consecutiveBoardCounts":{},"previousConsecutiveBoardCounts":{},"firstBoardBreakStocks":[],"allBreakStocks":[],"earthSkyStocks":[],
            "limitDownCount":None,"limitDownTouched":None,"limitDownSealed":None,"limitDownSealingRate":None,"yesterdayLimitUpTodayDown":None,"limitDownThemes":[]}
     if not BASIC_DB.exists(): return empty
     try:
         conn=sqlite3.connect(f"file:{BASIC_DB}?mode=ro",uri=True,timeout=3); conn.row_factory=sqlite3.Row
         recent_dates=[r[0] for r in conn.execute("SELECT DISTINCT trade_date FROM tbl_cn_day WHERE trade_date<=? ORDER BY trade_date DESC LIMIT 60",(date,)).fetchall()]
+        counts_by_day={}; prior_traded_counts={}
         if recent_dates:
             placeholders=','.join('?' for _ in recent_dates)
             history_rows=conn.execute(f"""SELECT d.trade_date,d.ts_code,d.close,l.up_limit FROM tbl_cn_day d
-                JOIN tbl_cn_stk_limit l ON l.trade_date=d.trade_date AND l.ts_code=d.ts_code
+                LEFT JOIN tbl_cn_stk_limit l ON l.trade_date=d.trade_date AND l.ts_code=d.ts_code
                 WHERE d.trade_date IN ({placeholders}) ORDER BY d.trade_date,d.ts_code""",recent_dates).fetchall()
             history_days={day:{"date":day,"first":0,"secondThird":0,"fourPlus":0,"highest":0} for day in recent_dates[:30]}
             topic_names=[str(topic.get("name") or "") for topic in topics if topic.get("name")]
@@ -788,13 +864,31 @@ def market_stats(date, topics):
                     graph_topics_by_date.setdefault(day,[]).append(group)
             except Exception as theme_exc:
                 print(f"[review] KPL performance theme history unavailable: {type(theme_exc).__name__}: {theme_exc}",flush=True)
-            streaks={}
+            # Seed runs crossing the chart's 60-session window without truncating them.
+            initial_counts={}
+            first_seen=set()
             for row in history_rows:
-                code=row["ts_code"]; day=row["trade_date"]
-                sealed=row["close"] is not None and row["up_limit"] is not None and abs(float(row["close"])-float(row["up_limit"]))<0.005
-                streaks[code]=streaks.get(code,0)+1 if sealed else 0
-                if day in history_days and sealed:
-                    board=streaks[code]; item=history_days[day]
+                if row["ts_code"] in first_seen: continue
+                first_seen.add(row["ts_code"])
+                if not is_closed_limit_up(row): continue
+                count=0
+                cursor=conn.execute("""SELECT d.close,l.up_limit FROM tbl_cn_day d
+                    LEFT JOIN tbl_cn_stk_limit l ON l.trade_date=d.trade_date AND l.ts_code=d.ts_code
+                    WHERE d.ts_code=? AND d.trade_date<? ORDER BY d.trade_date DESC""",(row["ts_code"],row["trade_date"]))
+                for prior_row in cursor:
+                    if not is_closed_limit_up(prior_row): break
+                    count+=1
+                cursor.close()
+                initial_counts[row["ts_code"]]=count
+            prior_traded_counts=dict(initial_counts)
+            counts_by_day=consecutive_board_history(history_rows,initial_counts)
+            current_board_counts={code.split(".")[0][-6:]:count for code,count in counts_by_day.get(date,{}).items()}
+            for row in history_rows:
+                code=row["ts_code"]; day=str(row["trade_date"])
+                board=counts_by_day.get(day,{}).get(code,0)
+                if day<date: prior_traded_counts[code]=board
+                if day in history_days and board:
+                    item=history_days[day]
                     if board==1: item["first"]+=1
                     elif board<=3: item["secondThird"]+=1
                     else: item["fourPlus"]+=1
@@ -807,6 +901,7 @@ def market_stats(date, topics):
                         topic_item["highest"]=max(topic_item["highest"],board)
             empty["limitUpHistory"]=[history_days[d] for d in sorted(history_days)]
             empty["topicLimitUpHistory"]={name:[topic_history_days[name][d] for d in sorted(topic_history_days[name])] for name in topic_names}
+            empty["consecutiveBoardCounts"]=current_board_counts
         current=conn.execute("""SELECT d.ts_code,d.open,d.high,d.low,d.close,d.pre_close,d.pct_chg,l.up_limit,l.down_limit FROM tbl_cn_day d JOIN tbl_cn_stk_limit l
             ON l.trade_date=d.trade_date AND l.ts_code=d.ts_code WHERE d.trade_date=?""",(date,)).fetchall()
         if not current: conn.close(); return empty
@@ -830,7 +925,7 @@ def market_stats(date, topics):
                 bins.append({"label":label,"count":count,"fraction":count/len(values) if values else None})
             distributions.append({"name":name,"count":len(values),"description":cap_desc.get(name,"全部个股"),"bins":bins})
         hit=lambda r: r["high"] is not None and r["up_limit"] is not None and abs(float(r["high"])-float(r["up_limit"]))<0.005
-        close_limit=lambda r: r["close"] is not None and r["up_limit"] is not None and abs(float(r["close"])-float(r["up_limit"]))<0.005
+        close_limit=is_closed_limit_up
         down_hit=lambda r: r["low"] is not None and r["down_limit"] is not None and abs(float(r["low"])-float(r["down_limit"]))<0.005
         close_down=lambda r: r["close"] is not None and r["down_limit"] is not None and abs(float(r["close"])-float(r["down_limit"]))<0.005
         current_by_code={r["ts_code"]:r for r in current}; hit_codes={c for c,r in current_by_code.items() if hit(r)}
@@ -842,21 +937,15 @@ def market_stats(date, topics):
         result["returnDistributions"]=distributions
         result.update(limitDownCount=len(down_sealed_codes),limitDownTouched=len(down_hit_codes),limitDownSealed=len(down_sealed_codes),limitDownSealingRate=len(down_sealed_codes)/len(down_hit_codes) if down_hit_codes else None)
         def streak(code,day):
-            rows=conn.execute("""SELECT d.close,l.up_limit FROM tbl_cn_day d LEFT JOIN tbl_cn_stk_limit l
-                ON l.trade_date=d.trade_date AND l.ts_code=d.ts_code WHERE d.ts_code=? AND d.trade_date<=?
-                ORDER BY d.trade_date DESC LIMIT 8""",(code,day)).fetchall()
-            n=0
-            for r in rows:
-                if r["close"] is None or r["up_limit"] is None or abs(float(r["close"])-float(r["up_limit"]))>=0.005: break
-                n+=1
-            return n
-        buckets={2:"二板",3:"三板",4:"四板",5:"五板及以上"}
+            return counts_by_day.get(str(day),{}).get(code,0)
+        result["previousConsecutiveBoardCounts"]={code.split(".")[0][-6:]:count for code,count in counts_by_day.get(str(prev),{}).items()}
+        buckets={2:"二板",3:"三板",4:"四板",5:"高板"}
         # Board-level promotion cohorts are grouped by the board they would advance into.
         promo_den={k:0 for k in buckets}; promo_num={k:0 for k in buckets}
         if prev:
             previous=conn.execute("""SELECT d.ts_code,d.close,l.up_limit FROM tbl_cn_day d JOIN tbl_cn_stk_limit l
                 ON l.trade_date=d.trade_date AND l.ts_code=d.ts_code WHERE d.trade_date=?""",(prev,)).fetchall()
-            prior_sealed={r["ts_code"] for r in previous if r["close"] is not None and r["up_limit"] is not None and abs(float(r["close"])-float(r["up_limit"]))<0.005}
+            prior_sealed={r["ts_code"] for r in previous if is_closed_limit_up(r)}
             result["yesterdayLimitUpTodayDown"]=len(prior_sealed & down_sealed_codes)
             prior_meta={}
             try:
@@ -867,16 +956,19 @@ def market_stats(date, topics):
                         FROM tbl_cn_kpl_list l LEFT JOIN tbl_cn_kpl_limit_performance p
                         ON p.trade_date=l.trade_date AND p.ts_code=l.ts_code
                         WHERE l.trade_date=? AND l.tag='涨停'""",(prev,)).fetchall()}
+                    for row in kc.execute("SELECT ts_code,name,theme,board_period FROM tbl_cn_kpl_limit_performance WHERE trade_date=?",(prev,)):
+                        metadata=prior_meta.setdefault(row["ts_code"],{})
+                        for key,column in (("name","name"),("theme","theme"),("status","board_period")):
+                            if row[column]: metadata[key]=row[column]
             except Exception: pass
             non_promoted=[]
             for code in prior_sealed-sealed_codes:
-                bar=current_by_code.get(code)
-                if bar is None: continue
+                bar=current_by_code.get(code) or {key:None for key in ("open","high","pre_close","up_limit","pct_chg")}
                 prior_board=streak(code,prev); metadata=prior_meta.get(code,{})
                 pre_close=bar["pre_close"]
                 high_pct=(float(bar["high"])/float(pre_close)-1)*100 if bar["high"] is not None and pre_close not in (None,0) else None
                 opened_at_limit=bar["open"] is not None and bar["up_limit"] is not None and abs(float(bar["open"])-float(bar["up_limit"]))<0.005
-                non_promoted.append({"ts_code":code,"name":metadata.get("name") or code.split(".")[0],"theme":metadata.get("theme") or "","board_count":prior_board,"previous_status":metadata.get("status") or "","touched_limit_today":code in hit_codes,"opened_at_limit":opened_at_limit,"close_pct":float(bar["pct_chg"]) if bar["pct_chg"] is not None else None,"high_pct":high_pct})
+                non_promoted.append({"ts_code":code,"name":metadata.get("name") or code.split(".")[0],"theme":metadata.get("theme") or "","board_count":prior_board,"previousConsecutiveBoardCount":prior_board,"promotionTarget":min(prior_board+1,5),"previous_status":metadata.get("status") or "","touched_limit_today":code in hit_codes,"opened_at_limit":opened_at_limit,"close_pct":float(bar["pct_chg"]) if bar["pct_chg"] is not None else None,"high_pct":high_pct})
             result["nonPromotedStocks"]=sorted(non_promoted,key=lambda item:(-item["board_count"],item["name"]))
             for code in prior_sealed:
                 target=min(streak(code,prev)+1,5)
@@ -889,21 +981,53 @@ def market_stats(date, topics):
         # assigned the board it attempted based on the prior consecutive sealed streak.
         seal_buckets={1:"首板",**buckets}; seal_den={k:0 for k in seal_buckets}; seal_num={k:0 for k in seal_buckets}
         for code in hit_codes:
-            before=streak(code,prev) if prev else 0
-            target=min(before+1,5)
+            # Resumption preserves its traded-session run, but promotion still
+            # requires membership in the actual previous market day's cohort.
+            board=streak(code,date) if code in sealed_codes else prior_traded_counts.get(code,0)+1
+            target=min(board,5)
             if target in seal_den:
                 seal_den[target]+=1
                 if code in sealed_codes: seal_num[target]+=1
         result["promotionBoards"]=[{"label":buckets[k],"numerator":promo_num[k],"denominator":promo_den[k],"rate":promo_num[k]/promo_den[k] if promo_den[k] else None} for k in buckets]
         result["sealingBoards"]=[{"label":seal_buckets[k],"numerator":seal_num[k],"denominator":seal_den[k],"rate":seal_num[k]/seal_den[k] if seal_den[k] else None} for k in seal_buckets]
-        def score(topic):
+        # Daily OHLC is the complete final-outcome universe. A source flag such as
+        # performance.is_break does not prove that the stock stayed unsealed.
+        source_pool=pool if pool is not None else kpl_pool(date)
+        source_breaks=source_pool.get("all_break_stocks") or source_pool.get("break_stocks",[])
+        break_metadata={str(stock.get("ts_code")):stock for stock in source_breaks}
+        names={str(row[0]):str(row[1] or "") for row in conn.execute("SELECT ts_code,name FROM tbl_cn_basic")}
+        failures=[]
+        for code in sorted(hit_codes-sealed_codes):
+            bar=current_by_code[code]
+            if bar["close"] is None or float(bar["close"])>=float(bar["up_limit"])-0.005: continue
+            item=dict(break_metadata.get(code,{}))
+            explicit=str(item.get("performance_theme") or "").strip()
+            # With no performance row, use the first explicit KPL list label;
+            # industry is not a same-day theme and cannot supply attribution.
+            fallback=re.split(r"[、,，;；]",str(item.get("theme") or item.get("lu_desc") or ""))[0].strip()
+            if fallback in ("暂无题材","暂无数据","未分类"): fallback=""
+            theme=explicit or fallback or "暂无题材"
+            before=prior_traded_counts.get(code,0)
+            item.update(ts_code=code,name=item.get("name") or names.get(code) or code.split(".")[0],
+                        theme=theme,classification_theme=theme,classification_source="kpl_performance" if explicit else "kpl_list" if fallback else "unavailable",
+                        previousConsecutiveBoardCount=before,attemptedBoardCount=before+1,
+                        close_pct=float(bar["pct_chg"]) if bar["pct_chg"] is not None else None,
+                        daily_close=float(bar["close"]),first_limit_time=item.get("first_limit_time") or "",break_time=item.get("break_time") or "")
+            failures.append(item)
+        failures=attach_daily_prices(date,failures,limit_status="Z")
+        for item in failures:
+            if not item.get("first_limit_time"): item["first_limit_time"]=item.get("ths_first_limit_time") or ""
+        result["allBreakStocks"]=failures
+        result["firstBoardBreakStocks"]=[item for item in failures if item["attemptedBoardCount"]==1]
+        def score(topic,day):
             pts={1:1,2:3,3:6,4:8,5:10}; boards=[]
+            normalized={code.split(".")[0][-6:]:count for code,count in counts_by_day.get(str(day),{}).items()}
             for stock in topic.get("stocks",[]):
-                text=str(stock.get("status", "")); m=re.search(r"([1-9]\d*)\s*(?:连板|板)",text)
-                n=int(m.group(1)) if m else (1 if "首板" in text else 0); boards.append(n)
+                code=str(stock.get("ts_code") or stock.get("code") or "").split(".")[0][-6:]
+                boards.append(normalized.get(code,0))
             value=sum(pts.get(min(n,5),0) for n in boards)
             return value-(5 if len(boards)<2 else 1 if len(boards)<3 else 0)
-        top_today=sorted(topics,key=lambda t:(-score(t),-len(t.get("stocks",[])),t["name"]))[:5]
+        top_today=sorted(topics,key=lambda t:(-score(t,date),-len(t.get("stocks",[])),t["name"]))[:5]
         # Daily KPL tags provide attribution for exploded boards; raw OHLC/limit-price
         # rows remain the source of touched/sealed counts and rates.
         def theme_map(day):
@@ -914,10 +1038,24 @@ def market_stats(date, topics):
                     return result
             except Exception: return {}
         today_tags=theme_map(date); today_topic_rows=[]
+        # A close at the upper limit is later than the session's lower-limit low.
+        # Compare unadjusted prices with that day's actual exchange limit prices.
+        winners={str(stock.get("ts_code")):stock for stock in source_pool.get("stocks",[])}
+        report_themes={str(stock.get("code") or stock.get("ts_code") or "").split(".")[0][-6:]:topic["name"]
+                       for topic in topics for stock in topic.get("stocks",[])}
+        for code in sorted(down_hit_codes & sealed_codes):
+            bar=current_by_code[code]
+            if not (float(bar["up_limit"])>float(bar["down_limit"])>0): continue
+            source=winners.get(code,{})
+            theme=str(source.get("performance_theme") or today_tags.get(code) or report_themes.get(code.split(".")[0]) or "暂无题材").strip()
+            result["earthSkyStocks"].append({"ts_code":code,"code":code.split(".")[0],
+                "name":source.get("name") or names.get(code) or code.split(".")[0],"theme":theme,
+                "low":float(bar["low"]),"down_limit":float(bar["down_limit"]),
+                "close":float(bar["close"]),"up_limit":float(bar["up_limit"])})
         for topic in top_today:
             name=topic["name"]
             report_codes={str(s.get("code", ""))[-6:] for s in topic.get("stocks",[])}
-            members={c for c in hit_codes if name in today_tags.get(c,"") or c.split(".")[0] in report_codes}
+            members={c for c in hit_codes if name.strip()==today_tags.get(c,"").strip() or c.split(".")[0] in report_codes}
             num=len(members & sealed_codes); den=len(members)
             today_topic_rows.append({"name":name,"numerator":num,"denominator":den,"rate":num/den if den else None})
         result["sealingThemes"]=today_topic_rows
@@ -941,7 +1079,7 @@ def market_stats(date, topics):
                     for k in buckets
                 ]
             result["topicPromotionRates"]=topic_promotion_rates
-            top_prior=sorted(prior_topics,key=lambda t:(-score(t),-len(t.get("stocks",[])),t["name"]))[:5]
+            top_prior=sorted(prior_topics,key=lambda t:(-score(t,prev),-len(t.get("stocks",[])),t["name"]))[:5]
             rows=[]
             for topic in top_prior:
                 name=topic["name"]
@@ -954,7 +1092,7 @@ def market_stats(date, topics):
             for topic in top_prior:
                 name=topic["name"]
                 report_codes={str(s.get("code", ""))[-6:] for s in topic.get("stocks",[])}
-                members={c for c in down_sealed_codes if name in today_tags.get(c,"") or c.split(".")[0] in report_codes}
+                members={c for c in down_sealed_codes if name.strip()==today_tags.get(c,"").strip() or c.split(".")[0] in report_codes}
                 down_rows.append({"name":name,"count":len(members)})
             result["limitDownThemes"]=down_rows
         # Add same-day market facts for all non-promoted names, including those
@@ -1027,7 +1165,7 @@ class Handler(SimpleHTTPRequestHandler):
                     CACHE.set(key,dates,3600)
                 return self.send_json({"topic":topic,"dates":dates})
             if u.path=="/api/review":
-                date=safe_date(q.get("date",[""])[0]); key=f"review:v27:{date}"; report=CACHE.get(key)
+                date=safe_date(q.get("date",[""])[0]); key=f"review:v29:{date}"; report=CACHE.get(key)
                 if report is None:
                     pool=kpl_pool(date)
                     try:
@@ -1045,7 +1183,10 @@ class Handler(SimpleHTTPRequestHandler):
                 if any("amount" not in item for item in report.get("indices",[])):
                     report["indices"]=indices(date)
                     CACHE.set(key,report,1800)
-                report["marketStats"]=market_stats(date,report.get("topics",[]))
+                report["marketStats"]=market_stats(date,report.get("topics",[]),report.get("pool",{}))
+                if report["marketStats"].get("sealed") is not None:
+                    report["pool"]["all_break_stocks"]=report["marketStats"].pop("allBreakStocks")
+                    report["pool"]["break_stocks"]=report["marketStats"].pop("firstBoardBreakStocks")
                 span_cache={}
                 def add_limitup_span(stock):
                     code=str(stock.get("ts_code") or stock.get("code") or "")
