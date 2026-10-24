@@ -485,3 +485,191 @@ button.earth-sky-name:hover{color:var(--green);text-decoration:underline}
 .chart-zoom-controls{display:flex;align-items:center;gap:16px;min-width:0}.chart-zoom-controls[hidden]{display:none}.chart-zoom-controls .zoom-index-nav{display:flex;align-items:center;gap:7px;flex-shrink:0}.chart-zoom-controls .zoom-index-nav button{width:auto;height:28px;padding:0 9px;font:11px var(--sans);white-space:nowrap;border-radius:5px}.chart-zoom-controls .zoom-index-nav button:disabled{opacity:.32;cursor:default}.chart-zoom-controls .zoom-index-position{margin:0;font:10px var(--mono);color:#94a69e;white-space:nowrap}.chart-zoom-controls .zoom-index-periods{display:flex;gap:0;border:1px solid #3b4c43;border-radius:6px;overflow:hidden;flex-shrink:0}.chart-zoom-controls .zoom-index-periods button{width:32px;height:27px;padding:0;border:0;border-right:1px solid #33423c;border-radius:0;background:#18211d;color:#aebdb4;font:11px var(--sans)}.chart-zoom-controls .zoom-index-periods button:last-child{border-right:0}.chart-zoom-controls .zoom-index-periods button.active{background:#416650;color:#f0f5ef}.chart-zoom-controls button:hover:not(:disabled){background:#304638}.chart-zoom-controls button:focus-visible{outline:2px solid #b5c989;outline-offset:-2px}.has-index-controls #chartZoomTitle{white-space:nowrap;flex-shrink:0}.has-index-controls #chartZoomHint{white-space:nowrap}
 @media(max-width:950px){.has-index-controls #chartZoomHint{display:none}.chart-zoom-dialog>header.has-index-controls{gap:12px}.has-index-controls #closeChartZoom{margin-left:auto;flex-shrink:0}}
 @media(max-width:600px){.chart-zoom-dialog>header.has-index-controls{gap:7px;padding:0 8px}.has-index-controls #chartZoomTitle{font-size:12px}.chart-zoom-controls{gap:7px;overflow-x:auto}.chart-zoom-controls .zoom-index-nav{gap:4px}.chart-zoom-controls .zoom-index-nav button{font-size:10px;padding:0 5px}.chart-zoom-controls .zoom-index-periods button{width:26px}.has-index-controls #closeChartZoom{width:26px}}
+
+/* Stock-identity Sankey ladder with fixed date and board bands. */
+.ladder-page{--ladder-failed-bg:#eadfd329}.ladder-heading{display:flex;align-items:center;justify-content:space-between;gap:16px;margin-bottom:14px}.ladder-heading h1{margin:6px 0;font-size:25px}.ladder-tools{display:flex;align-items:center;gap:15px;color:var(--muted);font-size:11px}.ladder-tools select{font:inherit;color:var(--ink);background:var(--paper);border:1px solid var(--line);border-radius:5px;padding:5px 7px}.ladder-chart{overflow-x:auto;min-height:280px;background:var(--paper);border-radius:9px;border:1px solid var(--line)}.ladder-chart svg{display:block}.ladder-axis{font:600 11px var(--sans);fill:var(--muted)}.ladder-date{font:600 12px var(--mono);fill:var(--ink)}.ladder-date-last{fill:var(--green)}.ladder-grid{stroke:var(--line);stroke-width:1}.ladder-date-grid{stroke:var(--line);stroke-width:.6;stroke-dasharray:3 5}.ladder-theme-label{font:500 10px var(--sans)}.ladder-stock{cursor:pointer;transition:opacity .12s}.ladder-stock-name{font:500 11px var(--sans);fill:var(--ink)}.ladder-stock-meta{font:10px var(--mono);fill:var(--muted)}.ladder-stock:hover>rect:first-of-type,.ladder-stock:focus>rect:first-of-type{fill:#dbe7dd}.ladder-outcome .ladder-stock-name{fill:var(--muted)}.ladder-outcome>rect:first-of-type{fill:#eee8df}.ladder-link{opacity:.28;transition:opacity .12s}.ladder-link-failed{opacity:.17}.ladder-dim{opacity:.06!important}.ladder-legend{display:flex;flex-wrap:wrap;gap:5px 13px;margin:12px 0}.ladder-legend button{display:inline-flex;align-items:center;gap:5px;border:0;background:transparent;color:var(--muted);font:10px var(--sans);padding:3px 0;cursor:pointer}.ladder-legend i{width:7px;height:7px;display:block;border-radius:2px}.ladder-detail{display:flex;align-items:baseline;flex-wrap:wrap;gap:8px 15px;font-size:11px;padding:12px 0;color:var(--muted)}.ladder-detail[hidden]{display:none}.ladder-detail strong{font-size:13px;color:var(--ink)}.ladder-members{flex-basis:100%;line-height:1.8}.ladder-members small{font:10px var(--mono);opacity:.8}
+@media(max-width:800px){.ladder-heading{align-items:flex-start}.ladder-tools{align-items:flex-end;flex-direction:column;gap:5px}.ladder-tools>span{font-size:10px}.ladder-chart{margin-left:-5px;margin-right:-5px}}
+
+.ladder-chart{max-height:calc(100dvh - 240px);min-height:300px;overflow:auto;scrollbar-width:thin}.ladder-date-header{position:sticky;top:0;height:34px;background:var(--paper);border-bottom:1px solid var(--line);z-index:2}.ladder-date-header span{position:absolute;top:0;height:34px;display:flex;align-items:center;justify-content:center;font:600 12px var(--mono);color:var(--ink)}.ladder-date-header .ladder-date-last{color:var(--green)}
+@media(max-width:700px){.ladder-chart{max-height:calc(100dvh - 200px)}}
+
+.ladder-axis-rail{position:sticky;left:0;width:60px;height:0;z-index:1;pointer-events:none}.ladder-axis-rail>div{position:absolute;left:0;width:60px;background:var(--paper);border-right:1px solid var(--line);border-top:1px solid var(--line);box-sizing:border-box;padding:14px 10px;text-align:right;font:500 11px var(--sans);color:var(--muted)}.ladder-date-corner{position:sticky;left:0;width:60px;height:34px;background:var(--paper);display:flex;align-items:center;justify-content:center;font:500 10px var(--sans);color:var(--muted);z-index:3}
+
+/* Board badges, rounded stock nodes and in-place failure endpoints. */
+.ladder-board-number{font:500 10px var(--mono)}.ladder-link{opacity:.58}.ladder-link-ended{opacity:.6}.ladder-stock .ladder-stock-box{transition:fill .12s,stroke-opacity .12s}.ladder-stock:hover .ladder-stock-box,.ladder-stock:focus .ladder-stock-box{fill:#e8efe9;stroke-opacity:1}.ladder-termination{cursor:pointer}.ladder-termination:hover circle,.ladder-termination:focus circle{fill:#f8e3df}.ladder-stop-pending{font:10px var(--sans)}
+
+.ladder-range{display:flex;align-items:center;gap:10px;margin:0 0 12px}.ladder-range>button{background:var(--paper);border:1px solid var(--line);border-radius:5px;color:var(--muted);font-size:20px;width:24px;height:34px;cursor:pointer}.ladder-range>button:disabled{opacity:.35;cursor:default}.ladder-range-main{flex:1;min-width:0}.ladder-range-labels{display:flex;justify-content:space-between;font:10px var(--mono);color:var(--muted);margin-bottom:5px}.ladder-range-track{position:relative;height:19px;--range-from:0%;--range-to:100%}.ladder-range-track:before{content:"";position:absolute;left:0;right:0;top:8px;height:4px;border-radius:4px;background:linear-gradient(to right,var(--line) var(--range-from),#819b8a var(--range-from),#819b8a var(--range-to),var(--line) var(--range-to))}.ladder-range-track input{position:absolute;inset:0;width:100%;height:19px;margin:0;background:transparent;appearance:none;pointer-events:none}.ladder-range-track input::-webkit-slider-thumb{appearance:none;width:13px;height:18px;background:var(--paper);border:2px solid #6a8a75;border-radius:4px;pointer-events:auto;cursor:ew-resize}.ladder-range-track input::-moz-range-thumb{width:10px;height:15px;background:var(--paper);border:2px solid #6a8a75;border-radius:4px;pointer-events:auto;cursor:ew-resize}.ladder-range-track input:focus-visible{outline:1px solid #6a8a75;outline-offset:3px}.ladder-chart{max-height:calc(100dvh - 300px)}@media(max-width:700px){.ladder-chart{max-height:calc(100dvh - 260px)}}
+
+body:has(.ladder-vertical) .topbar{display:none}.content:has(.ladder-vertical){padding:0 7px 12px!important;max-width:none}.ladder-vertical{display:grid;grid-template-columns:116px minmax(0,1fr);gap:7px;align-items:start}.vl-controls{position:sticky;top:0;padding:9px 3px;max-height:100dvh;overflow:auto;scrollbar-width:thin}.vl-controls .ladder-heading{display:block;margin:0 0 9px}.vl-controls h1{font-size:17px;margin:5px 0}.vl-controls .eyebrow{font-size:7px;letter-spacing:.6px}.ladder-reading-hint{font-size:8px;color:var(--muted)}.vl-controls .ladder-legend{display:flex;flex-direction:column;gap:1px;margin-top:10px}.vl-controls .ladder-legend button{font-size:8px;line-height:1.5;text-align:left}.vl-controls .ladder-legend i{width:5px;height:5px}.vl-controls .ladder-detail{font-size:8px;line-height:1.7;display:block;padding:8px 0}.vl-controls .ladder-detail[hidden]{display:none}.vl-calendar .topic-nav-controls{display:flex;flex-wrap:wrap;gap:3px}.vl-calendar .date-nav-button{font-size:8px;padding:3px 5px;height:25px}.vl-calendar .topbar-calendar-trigger{width:100%;order:-1}.ladder-load-more{border:0;background:transparent;color:var(--muted);font:9px var(--sans);padding:10px 2px;width:100%;cursor:pointer}.ladder-load-more:disabled{opacity:.55;cursor:default}.vl-plot{min-width:0}.ladder-vertical .ladder-chart{overflow:visible;max-height:none;min-height:0;border:0;border-radius:0;margin:0;background:var(--paper);overflow-anchor:none}.vl-board-header{position:sticky;top:0;height:28px;background:var(--paper);border-bottom:1px solid var(--line);z-index:4}.vl-board-header>span{position:absolute;top:0;height:28px;display:flex;align-items:center;justify-content:center;font:500 10px var(--sans);color:var(--ink)}.vl-board-header .vl-date-corner{left:0;width:48px;color:var(--muted);font-size:8px}.vl-date-rail{position:relative;height:0;width:48px;z-index:2;pointer-events:none}.vl-date-rail span{position:absolute;left:0;width:48px;padding:14px 5px;background:var(--paper);color:var(--muted);font:9px var(--mono);border-top:1px solid var(--line);text-align:center}.vl-name{font:500 8px var(--sans);fill:var(--ink)}.vl-theme{font:500 8px var(--sans)}.vl-inline-theme{font:7.2px var(--sans)}.vl-board{font:7px var(--mono)}.vl-meta{font:7px var(--mono);fill:var(--muted)}.vl-stop{font:10px var(--sans)}.vl-stock{cursor:pointer}.vl-stock:hover>rect{fill:#e1ebe499}.vl-edge{stroke-width:1;opacity:.23;transition:opacity .12s}.vl-edge:hover{opacity:.7}.vl-stock:focus{outline:1px solid #779986;outline-offset:1px}@media(max-width:800px){.ladder-vertical{grid-template-columns:100px minmax(0,1fr)}.vl-plot{overflow-x:clip}}
+
+.ladder-vertical .ladder-chart{height:100dvh;max-height:100dvh;overflow:auto;scrollbar-width:thin}.vl-plot{overflow:visible}.vl-date-rail{position:sticky;left:0;width:44px}.vl-date-rail span{width:44px;box-shadow:1px 0 var(--line)}.vl-board-header .vl-date-corner{position:sticky;left:0;width:44px;background:var(--paper);z-index:5}.vl-board-header{z-index:4}.vl-stock .vl-name{font-size:8px}
+
+/* Full-width ladder with an end-date toolbar above the plot. */
+.ladder-vertical{height:100dvh;display:grid;grid-template-columns:minmax(0,1fr);grid-template-rows:auto minmax(0,1fr);gap:0;align-items:stretch}
+.content:has(.ladder-vertical){padding:0 7px!important}
+.vl-controls{position:static;padding:6px 8px 3px;max-height:none;overflow:hidden;min-width:0;border-bottom:1px solid var(--line)}
+.vl-toolbar{display:flex;align-items:center;flex-wrap:wrap;gap:5px 10px}
+.vl-controls .ladder-heading{display:flex;margin:0 8px 0 0}.vl-controls h1{font-size:17px;margin:0;white-space:nowrap}
+.vl-calendar .topic-nav-controls{flex-wrap:nowrap;align-items:center;gap:5px}.vl-calendar .date-nav-button{font-size:10px;height:27px;padding:3px 7px}
+.vl-calendar .topbar-calendar-trigger{width:auto;order:0}.vl-end-label{font-size:10px;color:var(--muted);white-space:nowrap}
+.vl-controls .ladder-load-more{width:auto;padding:5px 3px;font-size:10px;white-space:nowrap}
+.vl-controls .ladder-legend{flex-direction:row;flex-wrap:nowrap;gap:12px;margin:4px 0 0;overflow-x:auto;scrollbar-width:thin}
+.vl-controls .ladder-legend button{flex-shrink:0;white-space:nowrap;padding:2px 0;font-size:8px}
+.vl-controls .ladder-detail{padding:4px 0}.vl-plot{min-width:0;min-height:0;overflow:hidden}
+.ladder-vertical .ladder-chart{height:100%;max-height:100%;min-height:0;overflow:auto}
+@media(max-width:800px){.ladder-vertical{grid-template-columns:minmax(0,1fr)}.vl-toolbar{gap:4px 7px}.vl-controls h1{font-size:15px}.vl-calendar .date-nav-button{font-size:9px;padding:3px 5px}}
+
+/* Left controls, draggable date ruler, and free canvas panning. */
+.ladder-vertical{grid-template-columns:128px minmax(0,1fr);grid-template-rows:minmax(0,1fr);gap:7px}
+.vl-controls{padding:10px 5px;max-height:100dvh;overflow:auto;border-bottom:0;border-right:1px solid var(--line);scrollbar-width:thin}
+.vl-toolbar{display:block}.vl-controls .ladder-heading{margin:0 0 12px}.vl-controls h1{font-size:17px}
+.vl-calendar .topic-nav-controls{flex-wrap:wrap;justify-content:space-between;gap:4px 0}.vl-calendar .topbar-calendar-trigger{width:100%;order:-1;justify-content:center}.vl-calendar .date-nav-button{font-size:9px;padding:3px 4px}.vl-end-label{display:none}
+.vl-controls .ladder-load-more{display:block;width:100%;font-size:9px;text-align:left;padding:7px 0}
+.vl-controls .ladder-legend{flex-direction:column;flex-wrap:nowrap;gap:2px;overflow:visible;margin:10px 0 0}.vl-controls .ladder-legend button{font-size:8px;text-align:left;white-space:normal;line-height:1.6}
+.ladder-vertical .ladder-chart{cursor:grab;touch-action:none;user-select:none}.ladder-vertical .ladder-chart.vl-panning,.ladder-vertical .ladder-chart.vl-panning *{cursor:grabbing!important}
+.vl-board-header{cursor:ew-resize;touch-action:none;user-select:none}.vl-board-header.vl-ruler-dragging,.vl-board-header.vl-ruler-dragging *{cursor:grabbing!important}.vl-board-header:focus-visible{outline:1px solid #779986;outline-offset:-2px}
+.vl-board-header .vl-date-day{box-sizing:border-box;border-bottom:2px solid transparent}.vl-board-header .vl-date-day:hover{background:#77998610}.vl-board-header .vl-date-selected{border-bottom-color:#779986;background:#77998610;color:var(--green)}
+.vl-stock,.vl-inlet,.vl-edge,.vl-group-box,.vl-inline-theme{cursor:pointer}
+@media(max-width:800px){.ladder-vertical{grid-template-columns:112px minmax(0,1fr)}.vl-controls h1{font-size:15px}.vl-calendar .date-nav-button{font-size:8px;padding:3px}}
+
+/* Trading-day navigation is contained in the calendar popup. */
+.vl-load-status{display:block;margin-top:8px;font:8px var(--sans);color:var(--muted);overflow-wrap:anywhere}.vl-load-status[hidden]{display:none}
+.calendar-trade-navigation{display:flex;justify-content:space-between;gap:8px;margin-top:8px;padding-top:7px;border-top:1px solid #ffffff12}
+.calendar-day-nav{border:0;border-radius:5px;padding:5px 7px;background:#ffffff0b;color:#d9e3dc;font:10px var(--sans);cursor:pointer}.calendar-day-nav:hover:not(:disabled){background:#ffffff17}.calendar-day-nav:disabled{color:#53605b;cursor:default}
+
+.calendar-trade-navigation{gap:4px;align-items:center;flex-wrap:nowrap}.calendar-trade-navigation>button{white-space:nowrap;padding:5px;font-size:9px}.calendar-trade-navigation .calendar-latest-button{flex:1;text-align:center}
+
+/* Visible-canvas themes grouped by their maximum board level. */
+.vl-controls .ladder-legend{gap:9px}.vl-legend-tier h4{margin:0 0 3px;font:600 10px var(--sans);color:var(--ink)}.vl-legend-items{display:flex;flex-direction:column;gap:2px}
+.vl-controls .ladder-legend .vl-legend-items button{display:flex;align-items:center;gap:5px;width:100%;font-size:8px;line-height:1.5;padding:1px 0}
+.vl-legend-count-slot{display:flex;align-items:center;justify-content:center;flex:0 0 28px;width:28px}.vl-legend-count{display:inline-flex;align-items:center;justify-content:center;flex:none;width:var(--legend-count-size,16px);height:var(--legend-count-size,16px);box-sizing:border-box;border:1px solid var(--theme-color);border-radius:50%;color:var(--theme-color);font:8px var(--mono);background:var(--paper)}
+.vl-legend-items button[aria-pressed="true"]{color:var(--ink);font-weight:600}
+
+.vl-legend-range{font:9px var(--mono);color:var(--muted);white-space:nowrap;padding:0 0 6px;border-bottom:1px solid var(--line)}
+
+.vl-legend-range{display:flex;align-items:center;gap:5px;padding-bottom:7px;font-size:9px}.vl-range-count{display:inline-flex;align-items:center;justify-content:center;flex:0 0 17px;width:17px;height:17px;box-sizing:border-box;border:1px solid #87958d;border-radius:50%;color:var(--ink);font:9px var(--mono);background:var(--paper)}
+
+/* Emphasize themes reaching four boards or above in the visible ladder dates. */
+.vl-group-box.vl-theme-emphasis{fill:color-mix(in srgb,var(--ladder-theme-color) 24%,var(--paper));stroke-opacity:.65;stroke-width:.8}
+.vl-edge.vl-theme-emphasis{stroke-width:2;opacity:.5}
+.vl-edge.vl-theme-emphasis:hover{opacity:.8}
+
+.vl-inline-theme[role="link"]:hover,.vl-name[role="link"]:hover{text-decoration:underline;text-decoration-thickness:.7px}
+.vl-inline-theme[role="link"]:focus,.vl-name[role="link"]:focus{outline:1px dotted currentColor;outline-offset:2px}
+[data-vl-colored-theme]{transition:opacity .12s}
+
+
+
+.vl-board-header .vl-date-day{cursor:pointer}.vl-board-header .vl-date-day:focus-visible{outline:1px dotted var(--green);outline-offset:-3px}
+
+.vl-calendar .topic-nav-controls{display:flex;flex-wrap:nowrap;align-items:center;justify-content:flex-start;gap:4px}
+.vl-calendar .topbar-calendar-trigger{flex:0 1 92px;width:92px;min-width:0;order:0;gap:4px;padding:3px 4px;font-size:8px}
+.vl-calendar-show-all{display:inline-flex;align-items:center;justify-content:center;flex:0 0 24px;width:24px;height:27px;padding:0;border:1px solid var(--line);border-radius:5px;background:var(--paper);color:var(--ink);font:500 12px/1 var(--sans);cursor:pointer}
+.vl-calendar-show-all[hidden]{display:none}
+
+/* Board-tier controls filter themes by their visible-range peak and keep the legend index. */
+.vl-controls .ladder-legend .vl-tier-filter{display:inline-flex;align-items:center;width:auto;gap:0;margin:0;padding:0 3px 0 0;border:0;border-radius:2px;background:transparent;color:var(--ink);font:600 10px var(--sans);line-height:1.5;cursor:pointer}
+.vl-controls .ladder-legend .vl-tier-filter:hover{color:var(--green)}
+.vl-controls .ladder-legend .vl-tier-filter[aria-pressed="true"]{color:var(--green);text-decoration:underline;text-underline-offset:3px}
+.vl-controls .ladder-legend .vl-tier-filter:focus-visible{outline:1px solid var(--green);outline-offset:2px}
+.vl-controls .ladder-legend .vl-tier-below .vl-tier-filter,.vl-controls .ladder-legend .vl-tier-below .vl-legend-items button{color:#adb1ae}
+.vl-tier-below .vl-legend-count{--theme-color:#b9bdbb!important;color:#aeb3b0;background:transparent}
+
+/* A dated theme roster on label hover; its scroll stays inside the floating card. */
+.vl-topic-hover{position:fixed;z-index:1400;box-sizing:border-box;display:flex;flex-direction:column;overflow:hidden;border:1px solid color-mix(in srgb,var(--ladder-theme-color) 35%,var(--line));border-radius:10px;background:var(--paper);color:var(--ink);box-shadow:0 8px 30px #15251d24;font:10px var(--sans);text-align:left}
+.vl-topic-hover[hidden]{display:none}
+.vl-hover-head{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:7px 9px;border-bottom:1px solid var(--line);flex:none;background:color-mix(in srgb,var(--ladder-theme-color) 7%,var(--paper))}
+.vl-hover-head>div{display:flex;align-items:baseline;gap:7px;min-width:0;flex:1}.vl-hover-head strong,.vl-hover-count{flex:none}.vl-hover-head .vl-hover-catalyst{display:block;min-width:0;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;cursor:help}.vl-hover-head strong{font-size:13px;color:var(--ladder-theme-color)}.vl-hover-head span{font-size:9px;color:var(--muted);white-space:nowrap}
+.vl-hover-scroll{overflow:auto;overscroll-behavior:contain;min-height:0;scrollbar-width:thin}.vl-topic-hover table{width:100%;table-layout:fixed;border-collapse:collapse;font-size:10px;line-height:1.3}.vl-topic-hover th,.vl-topic-hover td{padding:2px 6px;border-bottom:1px solid var(--line);vertical-align:middle;text-align:left}.vl-topic-hover thead th{position:sticky;top:0;z-index:1;background:var(--paper);font-size:9px;color:var(--muted);font-weight:500;white-space:nowrap}
+.vl-hover-stock-col{width:112px}.vl-hover-time-col{width:68px}.vl-hover-amount-col{width:66px}.vl-topic-hover .vl-hover-tier th{padding:3px 6px;background:color-mix(in srgb,var(--ladder-theme-color) 5%,var(--paper));font-size:9px;font-weight:600}.vl-hover-tier span{margin-left:4px;color:var(--muted);font:8px var(--mono)}.vl-topic-hover .vl-hover-empty td{text-align:center;padding:2px 6px;color:var(--muted)}
+.vl-hover-stock{display:flex;align-items:center;gap:3px;width:100%;border:0;background:transparent;color:var(--ink);font:10px var(--sans);padding:0;white-space:nowrap;cursor:pointer;text-align:left}.vl-hover-stock:hover>span{text-decoration:underline}.vl-hover-stock:focus-visible{outline:1px dotted var(--ladder-theme-color);outline-offset:2px}.vl-hover-board{display:block;flex:0 0 20px;width:20px;height:20px;overflow:visible}.vl-hover-mono{font:9px var(--mono);white-space:nowrap}.vl-hover-reason{font-size:9px;line-height:1.3}.vl-hover-reason-text{display:block;min-width:0;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}.vl-topic-hover footer{flex:none;padding:4px 8px;font-size:9px;color:var(--muted);border-top:1px solid var(--line)}
+@media(max-width:600px){.vl-hover-stock-col{width:103px}.vl-hover-time-col{width:63px}.vl-hover-amount-col{width:58px}.vl-topic-hover th,.vl-topic-hover td{padding-left:4px;padding-right:4px}.vl-hover-head{padding:6px}.vl-hover-stock{font-size:9px;gap:2px}}
+
+.vl-hover-pct-col{width:60px}.vl-hover-growth-name{color:var(--red)}.vl-name.vl-growth-name{fill:var(--red)}
+@media(max-width:600px){.vl-hover-pct-col{width:53px}}
+
+/* Full date roster shares the compact topic hover and its scroll/tooltip behavior. */
+.vl-date-hover-theme-col{width:134px}.vl-date-hover .vl-hover-stock-col{width:116px}
+.vl-topic-hover .vl-date-hover-theme{border-right:1px solid var(--line);vertical-align:middle;background:color-mix(in srgb,var(--ladder-theme-color) 5%,var(--paper))}
+.vl-date-hover-ratio{display:inline-block;font:9px var(--mono);color:var(--ladder-theme-color);margin-right:4px;white-space:nowrap}.vl-date-hover-theme-name{font-size:10px;line-height:1.3;overflow-wrap:anywhere}
+
+@media(max-width:600px){.vl-date-hover-theme-col{width:104px}.vl-date-hover .vl-hover-stock-col{width:100px}}
+
+/* Row visibility is independent of theme filtering and aggregate expansion. */
+.vl-controls .vl-legend-tier>h4{display:flex;align-items:center;gap:4px}.vl-tier-visibility{appearance:auto;display:inline-block;flex:0 0 11px;width:11px;height:11px;margin:0;accent-color:#788880;cursor:pointer}.vl-tier-visibility:focus-visible{outline:1px solid var(--green);outline-offset:2px}
+
+/* The legend hover is a date-by-board matrix with names and stock badges only. */
+.vl-range-hover table{width:100%;min-width:0;table-layout:fixed;font-size:8.5px;line-height:1.15}.vl-range-hover th,.vl-range-hover td{vertical-align:top;padding:1px 3px;min-width:0;overflow:hidden}.vl-range-hover thead th{text-align:center;font-size:8px}.vl-range-hover tbody th{position:sticky;left:0;z-index:1;background:var(--paper);font-size:8px;white-space:nowrap;color:var(--muted);font-weight:500}.vl-range-hover thead th:first-child{left:0;z-index:3}.vl-range-hover .vl-hover-stock{min-height:16px;height:16px;font-size:8.5px;line-height:1.1;gap:2px;min-width:0;overflow:hidden}.vl-range-hover .vl-hover-stock>span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.vl-range-hover .vl-hover-board{flex:0 0 14px;width:14px;height:14px}.vl-range-hover .vl-range-empty{color:var(--muted);display:block;text-align:center;font-size:8px}.vl-range-hover .vl-hover-head{min-height:23px;padding:4px 6px;gap:5px}.vl-range-hover .vl-hover-head strong{font-size:11px}.vl-range-hover .vl-hover-head span{font-size:8px}
+
+
+/* Plot controls have their own row; the canvas scrolls below them. */
+.ladder-vertical .vl-plot{display:grid;grid-template-rows:44px minmax(0,1fr);min-height:0}
+.vl-plot-toolbar{display:flex;align-items:center;min-width:0;padding:5px 6px;border-bottom:1px solid var(--line);background:var(--paper)}
+.vl-plot-toolbar-actions{display:flex;align-items:center;gap:8px;margin-left:auto;flex-shrink:0}
+.vl-plot-toolbar .review-date-controls{display:flex;align-items:center;gap:5px;margin:0}
+.vl-plot-toolbar .date-nav-button{height:30px;padding:4px 9px;font-size:10px;white-space:nowrap}
+.vl-plot-toolbar .topbar-calendar-trigger{min-width:112px;justify-content:center}
+.vl-plot-toolbar .settings-button{height:30px;width:32px;font-size:16px}
+.vl-controls .ladder-heading{display:flex;align-items:center;justify-content:space-between;gap:4px}
+@media(max-width:700px){.vl-plot-toolbar{padding:5px 3px}.vl-plot-toolbar-actions{gap:4px}.vl-plot-toolbar .review-date-controls{gap:3px}.vl-plot-toolbar .date-nav-button{font-size:9px;padding:4px 5px}.vl-plot-toolbar .topbar-calendar-trigger{min-width:94px}}
+
+/* On-demand stock preview, isolated from the full-page chart lifecycle. */
+.vl-stock-preview{position:fixed;z-index:1450;display:flex;flex-direction:column;overflow:auto;box-sizing:border-box;scrollbar-width:thin;border:1px solid #b9c7bf;border-radius:9px;background:var(--paper);color:var(--ink);box-shadow:0 10px 35px #15251d30;padding:8px;font:10px var(--sans)}
+.vl-stock-preview[hidden]{display:none}
+.vl-stock-preview-head{display:flex;align-items:baseline;gap:9px;min-width:0;margin:0 0 6px;white-space:nowrap}
+.vl-stock-preview-head strong{font-size:14px}.vl-stock-preview-head span{font-size:9px;color:var(--muted)}.vl-stock-preview-head time{margin-left:auto;font:10px var(--mono);color:var(--muted)}
+.vl-stock-preview-facts{display:flex;flex-wrap:wrap;gap:5px 16px;border-bottom:1px solid var(--line);padding-bottom:7px;margin-bottom:7px}
+.vl-stock-preview-facts>div{display:flex;gap:5px;align-items:center}.vl-stock-preview-facts span{font-size:9px;color:var(--muted)}.vl-stock-preview-facts b{font:10px var(--mono)}
+.vl-stock-preview-charts{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:7px;min-width:0}
+.vl-stock-preview-chart{min-width:0}.vl-stock-preview-wide{grid-column:1/-1}
+.vl-stock-preview-chart h4{display:flex;align-items:center;gap:6px;font:600 10px var(--sans);margin:0 0 4px}.vl-stock-preview-chart h4 span{margin-left:auto;font:8px var(--mono);color:var(--muted)}
+.vl-stock-preview-mount{height:clamp(160px,29dvh,220px);width:100%;min-width:0;overflow:hidden;border-radius:5px;background:#0b0d0f}
+.vl-stock-preview-mount .empty-state{background:#0b0d0f;color:#9aa4ad;font-size:10px;border:0;border-radius:0;padding:25px 8px}
+.vl-stock-preview-loading{min-height:90px;display:grid;place-items:center;color:var(--muted);font-size:10px}
+@media(max-width:600px){.vl-stock-preview-head{gap:5px;flex-wrap:wrap}.vl-stock-preview-charts{grid-template-columns:minmax(0,1fr)}.vl-stock-preview-wide{grid-column:auto}.vl-stock-preview-facts{gap:4px 10px}.vl-stock-preview-mount{height:195px}}
+
+.vl-stock-preview-head .market-cap-badge{width:22px;height:22px;flex:0 0 22px;font-size:10px}
+.vl-stock-preview-head .vl-stock-preview-trait{display:inline-flex;align-items:center;justify-content:center;font:9px/1.2 var(--sans);height:17px;padding:1px 5px;box-sizing:border-box;border-radius:4px;border:1px solid #c0cbc4;color:#607267;background:#f1f5f2}
+.vl-stock-preview-head .vl-stock-preview-trait.one-word,.vl-stock-preview-head .vl-stock-preview-trait.t-shape{color:#bb4c46;background:#fff0ed;border-color:#e7b9b4}
+.vl-stock-preview-head .vl-stock-preview-trait.strong{color:#c36432;background:#fff3e7;border-color:#edc8a5}
+.vl-stock-preview-head .vl-stock-preview-trait.weak{color:#8a7462;background:#f4efea;border-color:#d8c7b7}
+
+.vl-stock-preview-chart .vl-stock-preview-daily-heading{gap:5px;align-items:center;flex-wrap:wrap}
+.vl-stock-preview-chart h4 .vl-daily-quote{display:flex;align-items:center;flex-wrap:wrap;gap:2px 5px;margin-left:0;min-width:0;font:8px/1.4 var(--mono);color:var(--ink)}
+.vl-stock-preview-chart h4 .vl-daily-stat{display:inline-flex;align-items:baseline;gap:2px;margin-left:0;font:inherit;color:inherit;white-space:nowrap}
+.vl-daily-stat i{font:7px var(--sans);font-style:normal;color:var(--muted)}.vl-daily-stat b{font:inherit}
+
+.vl-nested-theme-hover{z-index:1420}
+.vl-date-hover-theme-name[data-vl-nested-theme]{cursor:help}
+.vl-date-hover-theme-name[data-vl-nested-theme]:hover{text-decoration:underline;text-underline-offset:2px}
+.vl-date-hover-theme-name[data-vl-nested-theme]:focus-visible{outline:1px dotted currentColor;outline-offset:2px}
+
+.vl-plot-toolbar-leading{display:flex;align-items:center;gap:9px;min-width:0;margin-right:12px}
+.vl-toolbar-range{display:inline-flex;align-items:center;gap:5px;white-space:nowrap;color:var(--muted);font:10px var(--mono)}
+.vl-toolbar-range .vl-range-count{width:18px;height:18px;flex-basis:18px;font-size:9px}
+.vl-plot-toolbar-leading .vl-calendar-show-all{height:27px;min-width:26px;background:#edf4ee;color:#285a4e;border-color:#b8cbbd}
+.vl-plot-toolbar-leading .vl-calendar-show-all:hover{background:#dfece2;border-color:#8dab97}
+@media(max-width:800px){.vl-plot-toolbar{flex-wrap:wrap;gap:5px}.vl-plot-toolbar-leading{margin-right:0}.vl-toolbar-range{font-size:9px}.ladder-vertical .vl-plot{grid-template-rows:auto minmax(0,1fr)}}
+
+.vl-summary-toggle{height:27px;flex:none;border:1px solid var(--line);border-radius:5px;padding:0 8px;background:var(--paper);color:var(--ink);font:10px var(--sans);white-space:nowrap;cursor:pointer}
+.vl-summary-toggle:hover:not(:disabled){background:#edf4ee;border-color:#a9bfae}.vl-summary-toggle:disabled{opacity:.5;cursor:default}
+.vl-specified-day-controls{display:flex;align-items:center;gap:4px;min-width:0;margin:2px 0 8px}
+.vl-specified-day-controls label{display:inline-flex;align-items:center;gap:3px;flex:none;white-space:nowrap;font:8px var(--sans);color:var(--muted);cursor:pointer}
+.vl-specified-day-controls input[type="checkbox"]{width:10px;height:10px;margin:0;accent-color:#6f8e7d}
+.vl-specified-day-controls input[type="date"]{flex:1;width:0;min-width:0;height:24px;box-sizing:border-box;padding:2px;border:1px solid var(--line);border-radius:4px;background:var(--paper);color:var(--ink);font:8px var(--mono)}
+.vl-specified-day-controls input[type="date"]::-webkit-calendar-picker-indicator{width:10px;height:10px;padding:0;margin:0}
+.vl-specified-day-controls input[type="date"]::-webkit-datetime-edit{padding:0}
+
+.vl-legend-fraction{display:block;width:26px;height:26px;flex:none}
+.vl-specified-legend-status{padding:8px 0;color:var(--muted);font:9px/1.6 var(--sans)}
+.vl-specified-legend-empty{color:var(--muted);font:9px var(--mono);padding-left:8px}
+
+.vl-specified-day-controls .topbar-calendar-trigger{display:inline-flex;align-items:center;justify-content:center;flex:1;width:0;min-width:0;height:24px;padding:2px 3px;gap:3px;border:1px solid var(--line);border-radius:5px;background:var(--paper);color:var(--ink);font:8px var(--mono)}
+.vl-specified-day-controls .date-trigger-label{min-width:0;white-space:nowrap}
+.vl-specified-day-controls .nav-calendar-icon{font-size:9px;line-height:1;flex:none}
+
+.vl-controls .ladder-legend .vl-legend-grouping-toggle{display:inline-flex;align-items:center;justify-content:center;margin-left:3px;padding:1px 5px;width:auto;min-height:18px;border:1px solid var(--line);border-radius:4px;background:var(--paper);color:var(--muted);font:9px var(--sans);line-height:1.3;cursor:pointer}
+.vl-controls .ladder-legend .vl-legend-grouping-toggle:hover{color:var(--green);border-color:var(--green)}
+
+.vl-hover-head .vl-hover-theme-link{flex:none;display:inline;padding:0;margin:0;border:0;border-radius:2px;background:transparent;color:var(--ladder-theme-color);font:700 13px var(--sans);line-height:inherit;cursor:pointer;white-space:nowrap;text-align:left}
+.vl-hover-head .vl-hover-theme-link:hover{text-decoration:underline;text-underline-offset:2px}.vl-hover-head .vl-hover-theme-link:focus-visible{outline:1px solid currentColor;outline-offset:2px}.vl-range-hover .vl-hover-head .vl-hover-theme-link{font-size:11px}
