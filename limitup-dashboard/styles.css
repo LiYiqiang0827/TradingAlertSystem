@@ -710,3 +710,8 @@ body:has(.ladder-vertical) .topbar{display:none}.content:has(.ladder-vertical){p
 .vl-legend-stock-row .pct-up{color:var(--red)}.vl-legend-stock-row .pct-down{color:var(--green)}
 .vl-controls .ladder-legend .vl-legend-grouping-toggle{margin-left:1px;padding:1px 3px}
 @media(max-width:800px){.ladder-vertical.vl-has-legend-stocks{grid-template-columns:210px minmax(0,1fr)}.vl-controls .ladder-legend .vl-legend-items .vl-legend-stock-row{grid-template-columns:15px minmax(0,1fr) 33px 37px 32px;gap:1px}}
+
+/* Clickable fixed-direction sorting in each board section of the topic hover. */
+.vl-hover-sort{display:inline-flex;align-items:center;gap:2px;border:0;padding:0;background:transparent;color:inherit;font:inherit;white-space:nowrap;cursor:pointer}
+.vl-hover-sort:hover,.vl-hover-sort:focus-visible,.vl-topic-hover th[aria-sort="ascending"] .vl-hover-sort,.vl-topic-hover th[aria-sort="descending"] .vl-hover-sort{color:var(--ink)}
+.vl-hover-sort:focus-visible{outline:1px dotted currentColor;outline-offset:2px}.vl-hover-sort span{font-size:8px}

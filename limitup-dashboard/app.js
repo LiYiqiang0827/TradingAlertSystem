@@ -836,11 +836,42 @@
   function ladderHoverThemeTitle(theme,date,linked=false){
     return linked?`<button type="button" class="vl-hover-theme-link" data-vl-hover-theme="${esc(theme)}" data-vl-hover-theme-date="${date}" aria-label="查看${esc(theme)}题材页面，${esc(fmtDate(date))}">${esc(theme)}</button>`:`<strong>${esc(theme)}</strong>`;
   }
-  function renderLadderTopicHover(theme,date,stocks,details,loading=false,error=false,linkedTitle=false){
+  function ladderTopicSortValue(stock,details,key){
+    const facts=details?.stocks?.[stock.code];
+    if(key==='time'){
+      const time=stock.status==='unpromoted'?(stock.touchedLimit?facts?.time:''):stock.time||facts?.time;
+      const match=/^(\d{1,2}):(\d{2})(?::(\d{2}))?$/.exec(String(time||''));
+      if(!match)return null;const [hour,minute,second]=match.slice(1).map(value=>Number(value||0));
+      return hour<24&&minute<60&&second<60?hour*3600+minute*60+second:null;
+    }
+    const value=key==='pct'?facts?.pct??stock.pct:stock.status==='sealed'?facts?.sealAmount:null;
+    return value!=null&&value!==''&&Number.isFinite(Number(value))?Number(value):null;
+  }
+  function ladderSortTopicStocks(stocks,details,key=''){
+    return [...stocks].sort((a,b)=>{
+      if(['time','sealAmount','pct'].includes(key)){
+        const left=ladderTopicSortValue(a,details,key),right=ladderTopicSortValue(b,details,key);
+        if(left==null&&right!=null)return 1;if(right==null&&left!=null)return -1;
+        if(left!=null&&right!=null&&left!==right)return key==='time'?left-right:right-left;
+      }
+      return (a.status==='sealed'?0:1)-(b.status==='sealed'?0:1)||Number(b.board||b.previousBoard||0)-Number(a.board||a.previousBoard||0)||(a.time||details?.stocks?.[a.code]?.time||'99:99:99').localeCompare(b.time||details?.stocks?.[b.code]?.time||'99:99:99')||a.name.localeCompare(b.name,'zh-CN');
+    });
+  }
+  function ladderTopicSortHeading(key,label,sortKey){
+    const active=key===sortKey,ascending=key==='time',direction=ascending?'从早到晚':key==='sealAmount'?'从大到小':'从高到低';
+    return `<th aria-sort="${active?(ascending?'ascending':'descending'):'none'}"><button type="button" class="vl-hover-sort" data-vl-hover-sort="${key}" aria-label="${label}，${direction}" title="组内按${label}${direction}排列">${label}${active?`<span aria-hidden="true">${ascending?'↑':'↓'}</span>`:''}</button></th>`;
+  }
+  function sortLadderTopicHover(event,hover,sort,render){
+    const button=event.target.closest('[data-vl-hover-sort]');if(!button)return false;
+    const key=button.dataset.vlHoverSort;if(!['time','sealAmount','pct'].includes(key))return false;
+    event.preventDefault();event.stopPropagation();sort.key=key;render(sort.details,sort.loading,sort.error);
+    hover.card.querySelector(`[data-vl-hover-sort="${key}"]`)?.focus({preventScroll:true});return true;
+  }
+  function renderLadderTopicHover(theme,date,stocks,details,loading=false,error=false,linkedTitle=false,sortKey=''){
     const tiers=[{level:5,label:'高板'},{level:4,label:'四板'},{level:3,label:'三板'},{level:2,label:'二板'},{level:1,label:'首板'},{level:0,label:'破板'}],sealed=stocks.filter(stock=>stock.status==='sealed');
     const exactCatalyst=details?.catalysts?.[theme],relatedCatalysts=sealed.flatMap(stock=>{const byTheme=details?.stocks?.[stock.code]?.catalysts||{};return byTheme[stock.originalTheme]?[byTheme[stock.originalTheme]]:Object.values(byTheme);}),catalyst=String(exactCatalyst||[...new Set(relatedCatalysts.filter(Boolean))].join('；')).replace(/\s+/g,' ').trim();
-    return `<header class="vl-hover-head"><div>${ladderHoverThemeTitle(theme,date,linkedTitle)}<span>${esc(fmtDate(date))}</span><span class="vl-hover-catalyst" title="${esc(catalyst)}">${esc(catalyst||'—')}</span></div><span class="vl-hover-count">涨停 ${sealed.length} · 未 ${stocks.filter(stock=>stock.status==='unpromoted').length}${loading?'':' · 破 '+stocks.filter(stock=>stock.status==='broken').length}</span></header><div class="vl-hover-scroll"><table><colgroup><col class="vl-hover-stock-col"/><col class="vl-hover-pct-col"/><col class="vl-hover-time-col"/><col class="vl-hover-amount-col"/><col/></colgroup><thead><tr><th>股票</th><th>涨幅</th><th>涨停时间</th><th>封板金额</th><th>题材简因</th></tr></thead><tbody>${tiers.map(tier=>{
-      const members=stocks.filter(stock=>stock.hoverTier===tier.level).sort((a,b)=>(a.status==='sealed'?0:1)-(b.status==='sealed'?0:1)||Number(b.board||b.previousBoard||0)-Number(a.board||a.previousBoard||0)||(a.time||details?.stocks?.[a.code]?.time||'99:99:99').localeCompare(b.time||details?.stocks?.[b.code]?.time||'99:99:99')||a.name.localeCompare(b.name,'zh-CN')),failedCount=members.filter(stock=>stock.status==='unpromoted').length;
+    return `<header class="vl-hover-head"><div>${ladderHoverThemeTitle(theme,date,linkedTitle)}<span>${esc(fmtDate(date))}</span><span class="vl-hover-catalyst" title="${esc(catalyst)}">${esc(catalyst||'—')}</span></div><span class="vl-hover-count">涨停 ${sealed.length} · 未 ${stocks.filter(stock=>stock.status==='unpromoted').length}${loading?'':' · 破 '+stocks.filter(stock=>stock.status==='broken').length}</span></header><div class="vl-hover-scroll"><table><colgroup><col class="vl-hover-stock-col"/><col class="vl-hover-pct-col"/><col class="vl-hover-time-col"/><col class="vl-hover-amount-col"/><col/></colgroup><thead><tr><th>股票</th>${ladderTopicSortHeading('pct','涨幅',sortKey)}${ladderTopicSortHeading('time','涨停时间',sortKey)}${ladderTopicSortHeading('sealAmount','封板金额',sortKey)}<th>题材简因</th></tr></thead><tbody>${tiers.map(tier=>{
+      const members=ladderSortTopicStocks(stocks.filter(stock=>stock.hoverTier===tier.level),details,sortKey),failedCount=members.filter(stock=>stock.status==='unpromoted').length;
       return `<tr class="vl-hover-tier"><th colspan="5">${tier.label}<span>${tier.level===0?members.length:members.filter(stock=>stock.status==='sealed').length}${failedCount?' · 未 '+failedCount:''}</span></th></tr>`+(members.length?members.map(stock=>{
         const facts=details?.stocks?.[stock.code],rawReason=String(facts?.reasons?.[theme]||facts?.reasons?.[stock.originalTheme]||facts?.reason||'').replace(/\s+/g,' ').trim(),rawPct=facts?.pct??stock.pct,pct=Number(rawPct),hasPct=rawPct!=null&&Number.isFinite(pct),pctClass=hasPct?(pct>0?'pct-up':pct<0?'pct-down':''):'',time=stock.status==='unpromoted'?(stock.touchedLimit?facts?.time:''):stock.time||facts?.time,label=stock.status==='unpromoted'?'未晋级 · 昨'+(stock.previousBoardPeriod||stock.previousBoard+'板'):stock.status==='broken'?'破板':stock.boardPeriod,badge=stock.status==='sealed'?ladderHoverBoardBadge(stock):ladderHoverOutcomeBadge(stock);
         return `<tr><td><button type="button" class="vl-hover-stock" data-vl-hover-stock="${esc(stock.id)}" aria-label="${esc(stock.name+' · '+label+' · 查看个股')}" title="${esc(stock.name+' '+stock.code+' · '+label)}">${badge}<span data-vl-stock-preview="${esc(stock.id)}"${isLadderGrowthStock(stock.code)?' class="vl-hover-growth-name"':''}>${esc(stock.name)}</span></button></td><td class="vl-hover-mono ${pctClass}">${hasPct?(pct>0?'+':'')+pct.toFixed(2)+'%':'—'}</td><td class="vl-hover-mono">${esc(time||'—')}</td><td class="vl-hover-mono">${stock.status==='sealed'&&facts?compactBoardAmount(facts.sealAmount):'—'}</td><td class="vl-hover-reason"><span class="vl-hover-reason-text" title="${esc(rawReason)}">${esc(rawReason||'—')}</span></td></tr>`;
@@ -1025,10 +1056,10 @@
     async function show(anchor){
       if(ladderView!==view||view.data!==fullData||view.dragging||history.state?.view!=='ladder'||parent.card.hidden||!anchor.isConnected)return;
       closeLadderNestedThemeHover();clearTimeout(parent.hideTimer);hover.anchor=anchor;const requestId=++hover.requestId,theme=anchor.dataset.vlNestedTheme,date=anchor.dataset.vlNestedDate,key=date+':'+view.dataVersion,record=ladderDateDetailCache.get(key),cached=record&&Date.now()-record.savedAt<record.ttl?record.payload:null;
-      let stocks=[];hover.card.style.setProperty('--ladder-theme-color',ladderThemeColor(theme));
-      const render=(details,loading=false,error=false)=>{stocks=ladderDateHoverStocks(fullData,date,details||{brokenStocks:(fullData.brokenStocks||[]).filter(stock=>stock.date===date)}).filter(stock=>stock.theme===theme);hover.card.innerHTML=renderLadderTopicHover(theme,date,stocks,details,loading,error);positionLadderTopicHover(anchor,hover.card);};
+      let stocks=[];const sort={key:''};hover.card.style.setProperty('--ladder-theme-color',ladderThemeColor(theme));
+      const render=(details,loading=false,error=false)=>{Object.assign(sort,{details,loading,error});stocks=ladderDateHoverStocks(fullData,date,details||{brokenStocks:(fullData.brokenStocks||[]).filter(stock=>stock.date===date)}).filter(stock=>stock.theme===theme);hover.card.innerHTML=renderLadderTopicHover(theme,date,stocks,details,loading,error,false,sort.key);positionLadderTopicHover(anchor,hover.card);};
       render(cached,!cached);hover.card.hidden=false;positionLadderTopicHover(anchor,hover.card);
-      hover.card.onclick=event=>{const row=event.target.closest('[data-vl-hover-stock]');if(!row)return;event.preventDefault();const stock=stocks.find(item=>item.id===row.dataset.vlHoverStock);closeLadderTopicHover();if(stock?.status==='unpromoted')navigateUnpromoted(stock.id,stock);else if(stock?.status==='broken')navigateBroken(stock);else if(stock)navigateStock(stock.id,stock);};
+      hover.card.onclick=event=>{if(sortLadderTopicHover(event,hover,sort,render))return;const row=event.target.closest('[data-vl-hover-stock]');if(!row)return;event.preventDefault();const stock=stocks.find(item=>item.id===row.dataset.vlHoverStock);closeLadderTopicHover();if(stock?.status==='unpromoted')navigateUnpromoted(stock.id,stock);else if(stock?.status==='broken')navigateBroken(stock);else if(stock)navigateStock(stock.id,stock);};
       if(cached)return;
       try{const details=await getLadderDateDetails(date,view.dataVersion);if(requestId!==hover.requestId||hover.anchor!==anchor||ladderView!==view||view.data!==fullData||!anchor.isConnected||parent.card.hidden)return;render(details);}
       catch(error){if(requestId===hover.requestId&&hover.anchor===anchor&&anchor.isConnected)render(null,false,true);}
@@ -1056,12 +1087,12 @@
       const key=date+':'+view.dataVersion,cache=ladderDateDetailCache,record=cache.get(key),cached=record&&Date.now()-record.savedAt<record.ttl?record.payload:null;
       const hoverData=anchor.hasAttribute('data-vl-specified-legend')&&view.specifiedLegendPayload?.date===date?{...fullData,...view.specifiedLegendPayload}:fullData;
       const roster=details=>ladderDateHoverStocks(hoverData,date,details||{brokenStocks:hoverData.brokenStocks||[]}).filter(stock=>isDate||stock.theme===theme);
-      let stocks=roster(cached);
+      let stocks=roster(cached);const sort={key:''};
       hover.card.dataset.hoverMode=isDate?'date':'topic';hover.card.classList.toggle('vl-date-hover',isDate);hover.card.setAttribute('aria-label',isDate?'当日天梯列表':'题材当日涨停列表');
       hover.card.style.setProperty('--ladder-theme-color',isDate?'var(--green)':ladderThemeColor(theme));
-      const render=(details,loading=false,error=false)=>{closeLadderNestedThemeHover();stocks=roster(details);hover.card.innerHTML=isDate?renderLadderDateHover(date,stocks,details,loading,error):renderLadderTopicHover(theme,date,stocks,details,loading,error,Boolean(anchor.closest('#ladderLegend')));positionLadderTopicHover(anchor,hover.card);};
+      const render=(details,loading=false,error=false)=>{Object.assign(sort,{details,loading,error});closeLadderNestedThemeHover();stocks=roster(details);hover.card.innerHTML=isDate?renderLadderDateHover(date,stocks,details,loading,error):renderLadderTopicHover(theme,date,stocks,details,loading,error,Boolean(anchor.closest('#ladderLegend')),sort.key);positionLadderTopicHover(anchor,hover.card);};
       render(cached,!cached);hover.card.hidden=false;positionLadderTopicHover(anchor,hover.card);
-      hover.card.onclick=event=>{if(navigateTitle(event))return;const row=event.target.closest(isDate?'[data-vl-date-hover-stock]':'[data-vl-hover-stock]');if(!row)return;event.preventDefault();const id=isDate?row.dataset.vlDateHoverStock:row.dataset.vlHoverStock,stock=stocks.find(item=>item.id===id);closeLadderTopicHover();if(stock?.status==='unpromoted')navigateUnpromoted(id,stock);else if(stock?.status==='broken')navigateBroken(stock);else navigateStock(id,stock);};
+      hover.card.onclick=event=>{if(!isDate&&sortLadderTopicHover(event,hover,sort,render))return;if(navigateTitle(event))return;const row=event.target.closest(isDate?'[data-vl-date-hover-stock]':'[data-vl-hover-stock]');if(!row)return;event.preventDefault();const id=isDate?row.dataset.vlDateHoverStock:row.dataset.vlHoverStock,stock=stocks.find(item=>item.id===id);closeLadderTopicHover();if(stock?.status==='unpromoted')navigateUnpromoted(id,stock);else if(stock?.status==='broken')navigateBroken(stock);else navigateStock(id,stock);};
       if(cached)return;
       try{const details=await getLadderDateDetails(date,view.dataVersion);if(requestId!==hover.requestId||hover.anchor!==anchor||ladderView!==view||view.data!==fullData||history.state?.view!=='ladder')return;render(details);}
       catch(error){if(requestId!==hover.requestId||hover.anchor!==anchor)return;render(null,false,true);}
