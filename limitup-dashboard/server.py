@@ -9,8 +9,8 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs
 
-TDM=Path.home()/"TradingDataManager"
-DBROOT=Path.home()/"TradingDatabase"
+TDM=Path(os.environ.get("TRADING_DATA_MANAGER_ROOT",str(Path.home()/"TradingDataManager"))).expanduser().resolve()
+DBROOT=Path(os.environ.get("TRADING_DATABASE_ROOT",str(Path.home()/"TradingDatabase"))).expanduser().resolve()
 KPL_DB=DBROOT/"offline"/"db_cn_kpl.db"
 BASIC_DB=DBROOT/"offline"/"db_cn_basic.db"
 WEBROOT=Path(__file__).resolve().parent
@@ -465,6 +465,10 @@ def market_topics(date, report, pool):
             if not code or code in seen:
                 continue
             seen.add(code)
+            # Preserve a daily summary only for an exact KPL theme match. A compound
+            # report heading must not be silently applied to a different market theme.
+            if source_name == topic["name"] and source_topic.get("summary"):
+                topic["summary"] = str(source_topic["summary"])
             stock=dict(raw_stock)
             missing_reason=not stock.get("reason") or not stock.get("bridge")
             if missing_reason:
@@ -1814,7 +1818,7 @@ def ladder_date_stock_details(date, include_details=True):
 
 def review_cache_key(date):
     revision=database_revision((KPL_DB,BASIC_DB,DBROOT/"offline"/"db_cn_index.db"))
-    return f"review:v30:{date}:{revision}"
+    return f"review:v31:{date}:{revision}"
 
 
 def review_data(date):

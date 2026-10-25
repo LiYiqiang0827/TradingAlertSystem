@@ -2,21 +2,23 @@
 
 与 `offlineAlertSystem/` 同级的本地 HTML 原型，默认只读访问 Mac mini 上 TradingDataManager / TradingDataBase 的现有数据。
 
-## 启动
+## 新机安装与启动
 
-在 Mac mini 项目目录运行：
+依赖仓库：[TradeDataManager](https://github.com/LiYiqiang0827/TradeDataManager)，配套版本为两个仓库的 `theme-graph-chain-v1` 标签。[完整配置、结构、生成/入库与两天最小示例](https://github.com/LiYiqiang0827/TradeDataManager/blob/theme-graph-chain-v1/theme_graph/PORTABLE_SETUP.md)。核心类的确切路径为 `coreClient/neo4j_client.py`，随 `pip install -e '.[graph]'` 安装，Neo4j driver 不是网页仓库内置依赖。
 
 ```bash
+export TRADING_DATA_MANAGER_ROOT="$HOME/TradingDataManager"
+export TRADING_DATABASE_ROOT="$HOME/TradingDataBase"
+# 按 manager 的 theme_graph/.env.example 配置自己的 Neo4j URI/密码。
 cd ~/TradingAlertSystem/limitup-dashboard
-PYTHONPATH="$HOME/TradingDataManager:$HOME/TradingDataManager/offlineDataManager/scripts" \
-  .venv/bin/python server.py
+"$TRADING_DATA_MANAGER_ROOT/.venv/bin/python" server.py
 ```
 
-如果 TradingDataManager 虚拟环境位置不同，可使用已安装有 pandas、SQLite 和数据 provider 依赖的 Python。默认监听 `127.0.0.1:8765`。浏览器打开 `http://127.0.0.1:8765/`。
+Python >=3.10；默认监听 `127.0.0.1:8765`，可用 `TRADINGALERT_HOST/PORT` 修改。源码和数据库路径均可配置，不依赖某位用户的 home。`.env` 需手动 source；不会自动加载。Neo4j 本身需单独启动，只有 Python driver 不够。Redis 可选。示例与正式数据应使用不同的目录、Neo4j 实例和端口。
 
 ## 数据与缓存
 
-- 题材、个股涨停原因：`~/TradingDatabase/theme_graph/每日涨停原因/YYYYMMDD.md`
+- 题材摘要、个股涨停原因：从 Neo4j `HAS_DAILY_SNAPSHOT` / `ATTRIBUTES_LIMITUP` 读取，原始日报保存在 `$TRADING_DATABASE_ROOT/theme_graph/每日涨停原因/YYYYMMDD.md`，网页不直接解析原始日报。
 - 涨停池：优先 `tbl_cn_kpl_list`，当日没有数据则使用 `tbl_cn_kpl_limit_performance`
 - 日线预载 2 年、周线预载 5 年、月线载入当前数据库中的全部历史，1 分钟预载最近 5 个交易日，15 分钟载入最近 3 个月
 - 每个周期独立缓存到 Redis DB 2，键按股票、周期、截止日期区分，复盘日数据缓存 7 天，最新行情缓存 5 分钟；缓存命中后不重复读取 data provider
