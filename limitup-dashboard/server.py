@@ -1405,7 +1405,7 @@ def ladder_board_pattern(raw,consecutive):
 
 
 def ladder_data_version():
-    return {"ladderDataVersion":database_revision((KPL_DB,BASIC_DB)),"ladderSeriesVersion":12,"cacheBackend":CACHE.backend}
+    return {"ladderDataVersion":database_revision((KPL_DB,BASIC_DB)),"ladderSeriesVersion":13,"cacheBackend":CACHE.backend}
 
 
 def limitup_ladder_data(end_date,sessions=5):
@@ -1548,6 +1548,11 @@ def limitup_ladder_data(end_date,sessions=5):
                 if multi or continuous or halted:
                     kind='suspension' if halted else 'broken' if gap else 'continuous'
                     edge={'source':previous['id'],'target':node['id'],'status':'promoted','kind':kind,'value':1,'gapDates':gap,'sourceBoard':previous['board'],'targetBoard':node['board']}
+                    if kind!='continuous':
+                        failure=gap[0] if halted else next(day for day in gap if (day,code) not in suspended)
+                        edge.update(code=code,name=node['name'],sourceDate=previous['date'],
+                                    failureDate=failure,targetDate=node['date'],
+                                    sessions=right-day_index[failure])
                     promotion.append(edge);outgoing[previous['id']]=edge
             previous=node
     broken_meta={}
@@ -2004,7 +2009,7 @@ class Handler(SimpleHTTPRequestHandler):
                 date=safe_date(q.get("date",[""])[0]);sessions=int(q.get("sessions",["5"])[0])
                 if not 1<=sessions<=30:raise ValueError("天梯窗口支持1至30个交易日")
                 meta=ladder_data_version()
-                key=f"limitup-ladder:v13:{date}:{sessions}:{meta['ladderDataVersion']}"
+                key=f"limitup-ladder:v14:{date}:{sessions}:{meta['ladderDataVersion']}"
                 today=datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=8))).strftime("%Y%m%d")
                 ttl=300 if date>=today else 24*3600
                 payload=CACHE.get(key);hit=payload is not None

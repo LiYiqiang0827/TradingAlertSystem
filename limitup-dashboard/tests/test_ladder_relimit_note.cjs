@@ -12,3 +12,23 @@ if(process.argv[2]){const payload=JSON.parse(fs.readFileSync(process.argv[2])),b
  for(const edge of payload.relimitLinks||[]){const node=by.get(edge.source);assert(node,'exact source '+edge.source);const before=JSON.stringify(edge),note=scope.ladderRelimitEntryNote(edge,node,100,40,measure);assert(!note.includes('undefined'));assert(!note.includes('NaN'));assert(note.includes('data-vl-relimit-prior-board="'+edge.sourceBoard+'"'));assert.equal(JSON.stringify(edge),before);count++;}
  console.log('PASS actual API relimit entry notes: '+count+' edge/source pairs');}
 console.log('PASS broken/continuous/multi-day board badges, date/session labels and fallback');
+
+// Each interrupted or suspended stock owns its exit and matching continuation inlet.
+const group='20261020:2:机器人概念',a={source:'20261020:A',kind:'broken'},b={source:'20261020:B',kind:'broken'};
+assert.notEqual(scope.ladderPromotionPortKey(group,a),scope.ladderPromotionPortKey(group,b));
+assert.notEqual(scope.ladderPromotionPortKey(group,{...a,kind:'suspension'}),scope.ladderPromotionPortKey(group,{...b,kind:'suspension'}));
+assert.equal(scope.ladderPromotionPortKey(group,{...a,kind:'continuous'}),scope.ladderPromotionPortKey(group,{...b,kind:'continuous'}));
+const targets=new Set(['target:A']);
+assert.equal(scope.ladderContinuationInletLabel([{id:'target:A'}],targets,'1/3'),'续');
+assert.equal(scope.ladderContinuationInletLabel([{id:'target:A'},{id:'target:B'}],targets,'2/3'),'2/3');
+assert.equal(scope.ladderContinuationInletLabel([{id:'target:B'}],targets,'1/3'),'1/3');
+const recovery={source:'source:A',target:'target:A',name:'凡拓数创',sourceBoard:2,failureDate:'20261021',targetDate:'20261023',sessions:2};
+const geometry={sx:100,sy:40,tx:200,ty:70,entryX:205.5,singleEntry:false,inletX:190,inletY:50};
+html=scope.ladderContinuationMarkers(recovery,{board:2},{name:'凡拓数创',theme:'机器人概念'},geometry,measure,'恢复');
+assert.equal((html.match(/data-vl-relimit-entry="/g)||[]).length,1);
+assert(html.includes('cx="205.5" cy="70"'));assert(html.includes('>续</text>'));
+assert(html.includes('>10/23 · 2日后 · 凡拓数创</text>'));assert(html.includes('>10/21 · 2日 · 凡拓数创</text>'));
+assert(html.includes('data-vl-ids="source:A|target:A"'));assert(!html.includes('undefined'));
+html=scope.ladderContinuationMarkers(recovery,{board:2},{name:'凡拓数创',theme:'机器人概念'},{...geometry,singleEntry:true},measure,'恢复');
+assert(!html.includes('data-vl-relimit-entry="'));assert(html.includes('data-vl-relimit-entry-note="target:A"'));
+console.log('PASS per-stock broken/suspended exits, dedicated continuation inlets and named date/session annotations');

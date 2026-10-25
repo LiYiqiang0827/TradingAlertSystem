@@ -50,6 +50,17 @@ class RecoveryTests(unittest.TestCase):
             edge=next(e for e in data['links'] if e['target']==DAYS[4]+':'+CODE)
             self.assertEqual(edge['source'],DAYS[1]+':'+CODE);self.assertEqual(edge['kind'],'broken');self.assertEqual(edge['gapDates'],DAYS[2:4])
             self.assertEqual((edge['sourceBoard'],edge['targetBoard']),(2,3))
+            self.assertEqual((edge['sourceDate'],edge['failureDate'],edge['targetDate'],edge['sessions'],edge['name']),(DAYS[1],DAYS[2],DAYS[4],2,'凡拓数创'))
+    def test_mixed_suspension_and_break_counts_from_first_active_failure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            scope=scope_for(Path(tmp),[DAYS[0],DAYS[4]],[DAYS[0],DAYS[4]],{DAYS[4]:'5天2板'},halts=[DAYS[1]])
+            edge=next(e for e in scope['limitup_ladder_data'](DAYS[4],5)['links'] if e['target']==DAYS[4]+':'+CODE)
+            self.assertEqual(edge['kind'],'broken');self.assertEqual(edge['failureDate'],DAYS[2]);self.assertEqual(edge['sessions'],2)
+    def test_continuous_promotion_needs_no_recovery_note(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            scope=scope_for(Path(tmp),DAYS[:2],DAYS[:2])
+            edge=next(e for e in scope['limitup_ladder_data'](DAYS[1],5)['links'] if e['target']==DAYS[1]+':'+CODE)
+            self.assertEqual(edge['kind'],'continuous');self.assertNotIn('failureDate',edge)
     def test_invisible_daily_row_cannot_consume_reported_predecessor(self):
         with tempfile.TemporaryDirectory() as tmp:
             # Day 21 looks sealed in daily OHLC but all three limit-up sources omit it.
@@ -64,6 +75,7 @@ class RecoveryTests(unittest.TestCase):
             data=scope['limitup_ladder_data'](DAYS[2],1)
             edge=next(e for e in data['links'] if e['target']==DAYS[2]+':'+CODE)
             self.assertEqual(edge['kind'],'suspension')
+            self.assertEqual((edge['failureDate'],edge['targetDate'],edge['sessions']),(DAYS[1],DAYS[2],1))
             ids={n['id'] for n in data['nodes']+data['contextStocks']}
             self.assertIn(edge['source'],ids);self.assertEqual(edge['source'],DAYS[0]+':'+CODE)
             self.assertEqual(data['suspensionCarry'][0]['board'],1)
