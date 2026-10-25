@@ -690,3 +690,23 @@ body:has(.ladder-vertical) .topbar{display:none}.content:has(.ladder-vertical){p
 
 /* Repaint focused paths atomically: do not fade new cards in from full opacity. */
 .ladder-chart[data-stock-focus] [data-vl-colored-theme],.ladder-chart[data-stock-focus] .vl-edge{transition:none!important}
+
+
+/* Legend circles disclose stock rows; theme names keep the theme focus action. */
+.ladder-vertical.vl-has-legend-stocks{grid-template-columns:230px minmax(0,1fr)}
+.vl-controls .vl-legend-tier>h4:has([data-vl-legend-stock-all]){gap:2px}
+.vl-controls .ladder-legend .vl-legend-stock-all{display:inline-flex;align-items:center;gap:2px;flex:none;white-space:nowrap;font:7px var(--sans);color:var(--muted);cursor:pointer}
+.vl-legend-stock-all input{width:9px;height:9px;margin:0;accent-color:#788880;cursor:pointer}
+.vl-legend-entry{min-width:0}.vl-legend-theme-row{display:grid;grid-template-columns:28px minmax(0,1fr);align-items:center;gap:5px}
+.vl-controls .ladder-legend .vl-legend-items .vl-legend-count-toggle{justify-content:center;width:28px;padding:0;border:0;background:transparent;cursor:pointer}
+.vl-controls .ladder-legend .vl-legend-items .vl-legend-theme-button{min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.vl-legend-count-toggle:focus-visible,.vl-legend-theme-button:focus-visible{outline:1px solid var(--green);outline-offset:1px}
+.vl-legend-stocks{min-width:0;margin:1px 0 3px 9px;padding-left:3px;border-left:1px solid var(--line)}
+.vl-controls .ladder-legend .vl-legend-items .vl-legend-stock-row{display:grid;grid-template-columns:16px minmax(0,1fr) 35px 39px 35px;align-items:center;gap:2px;min-width:0;height:20px;margin:0;padding:0 1px;border:0;border-radius:3px;background:transparent;color:var(--ink);font:8px/1.1 var(--sans);white-space:nowrap;cursor:pointer}
+.vl-legend-stock-row:hover,.vl-legend-stock-row:focus-visible{background:#e8eee9;outline:0}
+.vl-legend-stock-row .vl-hover-board{display:block;width:16px;height:16px;flex:none}
+.vl-legend-stock-name{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.vl-legend-stock-pct,.vl-legend-stock-row time,.vl-legend-stock-amount{font:7.5px var(--mono);text-align:right;white-space:nowrap}
+.vl-legend-stock-row .pct-up{color:var(--red)}.vl-legend-stock-row .pct-down{color:var(--green)}
+.vl-controls .ladder-legend .vl-legend-grouping-toggle{margin-left:1px;padding:1px 3px}
+@media(max-width:800px){.ladder-vertical.vl-has-legend-stocks{grid-template-columns:210px minmax(0,1fr)}.vl-controls .ladder-legend .vl-legend-items .vl-legend-stock-row{grid-template-columns:15px minmax(0,1fr) 33px 37px 32px;gap:1px}}
