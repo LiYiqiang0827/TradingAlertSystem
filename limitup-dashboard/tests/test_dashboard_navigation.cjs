@@ -56,5 +56,17 @@ function fixture(){
  const sealed=new Map(nodes.map(n=>[n.id,n])),links=[{source:nodes[0].id,target:nodes[1].id,status:'promoted',kind:'broken'},{source:nodes[1].id,target:nodes[2].id,status:'promoted',kind:'broken'},{source:nodes[2].id,target:nodes[3].id,status:'relimit'}];
  const before=c.ladderChainThemes(sealed,links,'20261021'),after=c.ladderChainThemes(sealed,links,'20261023');
  assert.equal(before.get(nodes[0].id).theme,'中期');assert.equal(before.has(nodes[2].id),false);assert.equal(after.get(nodes[0].id).theme,'峰值');assert.equal(after.get(nodes[3].id).theme,'独立');assert.equal(after.get(nodes[0].id).originalTheme,'早期');
- console.log('PASS navigation races, route changes, wrong-date response, topic consumers, index/stock navigation, revision guards, deep links, peak-theme attribution and bounded breaks recovery');
+ // Panning to a window without this stock must keep it selected. Returning
+ // to a populated window can then restore the same path without flashing all themes.
+ f=fixture();c=f.context;const focusedView={focusedStock:'301313.SZ'},focusHost={dataset:{stockFocus:'301313.SZ'},querySelectorAll:()=>[]};
+ c.view=focusedView;c.host=focusHost;c.stockFocusIndex={rows:[],cards:[],topics:[],traces:[]};
+ vm.runInContext(extract('    function applyStockFocus(', '    function focusStock('),c);
+ c.applyStockFocus();assert.equal(focusedView.focusedStock,'301313.SZ');assert.equal(focusHost.dataset.stockFocus,'301313.SZ');
+ focusedView.focusedStock='';c.applyStockFocus();assert.equal(focusHost.dataset.stockFocus,undefined);
+ // The focus marker must exist before mounting fresh SVG; both opacity
+ // transition sources are disabled only during stock focus.
+ assert(source.indexOf('host.dataset.stockFocus=ladderView.focusedStock',source.indexOf('  function paintLimitupLadder('))<source.indexOf('else host.innerHTML=markup',source.indexOf('  function paintLimitupLadder(')));
+ const css=fs.readFileSync(require('node:path').join(__dirname,'../styles.css'),'utf8');
+ assert(css.includes('.ladder-chart[data-stock-focus] [data-vl-colored-theme],.ladder-chart[data-stock-focus] .vl-edge{transition:none!important}'));
+ console.log('PASS navigation races, route changes, wrong-date response, topic consumers, index/stock navigation, revision guards, deep links, peak-theme attribution bounded breaks recovery and persistent stock focus during panning');
 })().catch(e=>{console.error(e);process.exitCode=1});
