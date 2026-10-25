@@ -1287,13 +1287,32 @@
     if(node.board_strength==='weak')return {kind:'weak',label:'弱板',color:'var(--ladder-theme-color)',dashed:true};
     return {kind:'normal',label:'',color:'var(--ladder-theme-color)',dashed:false};
   }
+  function ladderCardFragment(fresh){
+    const clone=fresh.cloneNode(true),cards=[...(clone.nodeType===1&&clone.hasAttribute('data-vl-card-key')?[clone]:[]),...clone.querySelectorAll?.('[data-vl-card-key]')||[]];
+    for(const card of cards)if(!card.hasChildNodes()){
+      const record=ladderView.cardMarkupCache?.get(card.dataset.vlCardKey)?.find(item=>String(item.token)===card.dataset.vlCardToken);
+      if(record)card.innerHTML=record.body;
+    }
+    return clone;
+  }
   function patchLadderDOM(existing,fresh){
+    // Card children use local coordinates. Identical content only needs a new outer transform.
+    if(existing.nodeType===1&&fresh.nodeType===1&&fresh.hasAttribute('data-vl-card-token')&&existing.getAttribute('data-vl-card-key')===fresh.getAttribute('data-vl-card-key')){
+      const oldToken=existing.getAttribute('data-vl-card-token'),token=fresh.getAttribute('data-vl-card-token');
+      for(const attribute of fresh.attributes)if(existing.getAttribute(attribute.name)!==attribute.value)existing.setAttribute(attribute.name,attribute.value);
+      if(oldToken===token)return;
+      const cache=ladderView.cardDOMCache,saved=cache.get(token),fragment=document.createDocumentFragment();
+      while(existing.firstChild)fragment.appendChild(existing.firstChild);cache.set(oldToken,fragment);
+      if(saved){cache.delete(token);existing.appendChild(saved);}else if(fresh.hasChildNodes())while(fresh.firstChild)existing.appendChild(fresh.firstChild);
+      else{const restored=ladderCardFragment(fresh);while(restored.firstChild)existing.appendChild(restored.firstChild);}
+      return;
+    }
     if(existing.isEqualNode(fresh))return;
-    if(existing.nodeType!==fresh.nodeType||existing.nodeName!==fresh.nodeName){existing.replaceWith(fresh.cloneNode(true));return;}
+    if(existing.nodeType!==fresh.nodeType||existing.nodeName!==fresh.nodeName){existing.replaceWith(ladderCardFragment(fresh));return;}
     if(existing.nodeType===Node.TEXT_NODE||existing.nodeType===Node.COMMENT_NODE){existing.nodeValue=fresh.nodeValue;return;}
     for(const attribute of [...existing.attributes])if(!fresh.hasAttribute(attribute.name))existing.removeAttribute(attribute.name);
     for(const attribute of fresh.attributes)if(existing.getAttribute(attribute.name)!==attribute.value)existing.setAttribute(attribute.name,attribute.value);
-    for(let i=0;i<fresh.childNodes.length;i++){const oldChild=existing.childNodes[i],newChild=fresh.childNodes[i];if(oldChild)patchLadderDOM(oldChild,newChild);else existing.appendChild(newChild.cloneNode(true));}
+    for(let i=0;i<fresh.childNodes.length;i++){const oldChild=existing.childNodes[i],newChild=fresh.childNodes[i];if(oldChild)patchLadderDOM(oldChild,newChild);else existing.appendChild(ladderCardFragment(newChild));}
     while(existing.childNodes.length>fresh.childNodes.length)existing.lastChild.remove();
   }
   function patchLadderLegend(existing,fresh){
@@ -1345,8 +1364,22 @@
     return entry+`<g class="vl-relimit-notes" data-vl-ids="${ids}" data-vl-focus-theme="${theme}" data-vl-relimit-notes="${esc(edge.target)}" aria-label="${esc(description)}"><title>${esc(description)}</title><text x="${sx+2}" y="${sy-7}" text-anchor="start">${esc(exitText)}</text>${ladderRelimitEntryNote(edge,sourceNode,noteRight,y,measure)}</g>`;
   }
 
+  function viewCardCache(view,data){
+    if(view.cardCacheData!==data){view.cardCacheData=data;view.cardMarkupCache=new Map();view.cardDOMCache=new Map();}
+    view.cardToken||=0;return view.cardMarkupCache||new Map();
+  }
+  function retainLadderCard(chips,start,key,y,previous,next,view){
+    const body=chips.splice(start).join(''),variants=previous.get(key)||[],cached=variants.find(record=>record.body===body),record=cached||{body,token:++view.cardToken};
+    // Retain at most the current and previous content states, scoped to this payload.
+    next.set(key,[record,...variants.filter(item=>item!==record)].slice(0,2));
+    const reuse=view.reuseCardDOM&&(record===variants[0]||view.cardDOMCache.has(String(record.token)));
+    chips.push(`<g data-vl-card-key="${esc(key)}" data-vl-card-token="${record.token}" transform="translate(0 ${y})">${reuse?'':body}</g>`);
+  }
+
   function paintLimitupLadder(data){
     const host=$('#ladderChart');if(!host||!data)return;if(ladderView.focusedStock)host.dataset.stockFocus=ladderView.focusedStock;if(ladderView.stockOnly&&ladderView.focusedStock)host.dataset.stockOnly=ladderView.focusedStock;else delete host.dataset.stockOnly;const paintStarted=performance.now(),patchPaint=Boolean(ladderView.patchPaint&&host.querySelector('svg'));ladderView.patchPaint=false;closeLadderTopicHover();
+    const previousCards=viewCardCache(ladderView,data),nextCards=new Map();ladderView.reuseCardDOM=patchPaint;
+    const paintProfile={},markPaint=name=>{paintProfile[name]=Number((performance.now()-paintStarted).toFixed(1));};
     const fullData=data,view=ladderView,hiddenLevels=view.hiddenLevels||=new Set(),compactThemes=new Set(view.compactThemes||[view.compactTheme].filter(Boolean)),compactTheme=[...compactThemes][0]||'',minBoard=view.minBoard||0,compactLayout=Boolean(compactThemes.size||minBoard);if(view.singleClickTimer){clearTimeout(view.singleClickTimer);view.singleClickTimer=0;}if(view.legendClickTimer){clearTimeout(view.legendClickTimer);view.legendClickTimer=0;}
     const days=[...data.dates].sort(),left=44,measureContext=view.measureContext||=document.createElement('canvas').getContext('2d'),labelFont=getComputedStyle(document.documentElement).getPropertyValue('--sans'),measureSignature=labelFont+document.fonts.status;if(view.measureSignature!==measureSignature){view.measureSignature=measureSignature;view.textWidths=new Map();}const textWidth=(text,size)=>{if(!measureContext)return String(text).length*size;const key=size+':'+text;if(view.textWidths.has(key))return view.textWidths.get(key);measureContext.font=`${size}px ${labelFont}`;const width=measureContext.measureText(String(text)).width;view.textWidths.set(key,width);return width;};
     const stockLabelWidth=node=>16+textWidth(node.name,8),allSealed=fullData.nodes.filter(node=>node.status==='sealed'),allFirstGroups=new Set(allSealed.filter(node=>node.board===1).map(node=>node.date+':'+node.theme)),allHigherGroups=new Set(allSealed.filter(node=>node.board>=2).map(node=>node.date+':'+Math.min(node.board,5)+':'+node.theme)),allFoldouts=(fullData.unpromotedStocks||[]).filter(stock=>ladderFailedLevel(stock)===1&&allFirstGroups.has(stock.date+':'+stock.theme)||allHigherGroups.has(stock.date+':'+ladderFailedLevel(stock)+':'+stock.theme)),fullLabelWidth=Math.ceil(Math.max(0,...allSealed.map(node=>textWidth(node.theme,7.2)))+3+Math.max(32,...allSealed.map(stockLabelWidth),...allFoldouts.map(stockLabelWidth))+2);
@@ -1391,10 +1424,11 @@
     const sealedThemeDays=new Set((fullData.sealedStocks||[]).filter(stock=>stock.status==='sealed'&&!['','暂无题材','暂无数据','未分类'].includes(stock.theme)).map(stock=>stock.date+':'+stock.theme)),brokenStandaloneTopics=new Map();
     for(const [day,topics] of brokenTopicLists){const standalone=topic=>sealedThemeDays.has(day+':'+topic.theme)||topic.stocks.some(stock=>restartBrokenSources.has(stock.id));brokenStandaloneTopics.set(day,topics.filter(standalone));brokenTopicLists.set(day,topics.filter(topic=>!standalone(topic)));}
     const brokenCardHeight=topic=>Math.max(25,topic.stocks.length*20+6);
-    function appendBrokenTopic(col,y,topic){
-      const color=themeColor(topic.theme),x=col.x+col.width-18-labelWidth,h=brokenCardHeight(topic),contentLeft=x+(labelWidth-themeSlot-3-stockSlot)/2,circleX=contentLeft+themeSlot+10,groupId=col.day+':0:broken:'+topic.theme;positions.set(groupId,{x,y,row:rows.find(row=>row.level===0),width:labelWidth,height:h,day:col.day,theme:topic.theme,inletX:x-10,inletY:y+h/2});
+    function appendBrokenTopic(col,cardY,topic){
+      const y=0,cardStart=chips.length;
+      const color=themeColor(topic.theme),x=col.x+col.width-18-labelWidth,h=brokenCardHeight(topic),contentLeft=x+(labelWidth-themeSlot-3-stockSlot)/2,circleX=contentLeft+themeSlot+10,groupId=col.day+':0:broken:'+topic.theme;positions.set(groupId,{x,y:cardY,row:rows.find(row=>row.level===0),width:labelWidth,height:h,day:col.day,theme:topic.theme,inletX:x-10,inletY:cardY+h/2});
       chips.push(`<g data-vl-broken-theme-card="${esc(col.day+':'+topic.theme)}" data-vl-colored-theme="${esc(topic.theme)}" data-vl-focus-theme="${esc(topic.theme)}" style="--ladder-theme-color:${color}"><rect class="vl-group-box" data-vl-box-theme="${esc(topic.theme)}" x="${x}" y="${y}" width="${labelWidth}" height="${h}" rx="5" fill="var(--paper)" stroke="var(--ladder-theme-color)" stroke-opacity=".4" stroke-width=".65"/><g class="vl-inlet" data-vl-focus-theme="${esc(topic.theme)}"><title>${esc(topic.theme)} · ${topic.stocks.length}只首板破板股</title><circle cx="${x-10}" cy="${y+h/2}" r="10" fill="var(--paper)" stroke="#8c9299" stroke-width=".8"/><text x="${x-10}" y="${y+h/2+2}" text-anchor="middle" fill="#747b83" style="font:6.5px var(--mono)">${topic.stocks.length}</text></g><text x="${contentLeft+themeSlot}" y="${y+h/2+2.8}" text-anchor="end" class="vl-inline-theme" role="link" tabindex="0" data-vl-topic="${esc(topic.theme)}" data-vl-topic-date="${col.day}" aria-label="${esc(topic.theme)} · ${fmtDate(col.day)} · 单击聚焦题材，双击或回车进入题材页面" fill="var(--ladder-theme-color)">${esc(topic.theme)}</text>`);
-      topic.stocks.forEach((stock,index)=>{const rowY=y+3+index*20;points.set(stock.id,{x:circleX-7,y:rowY+9,group:groupId,row:rows.find(row=>row.level===0)});const label=stock.name+' '+stock.code+' · '+fmtDate(stock.date)+' · '+topic.theme+' · 破板';chips.push(`<g class="vl-stock"><title>${esc(label)}</title><rect x="${circleX-8}" y="${rowY}" width="${x+labelWidth-circleX+6}" height="18" rx="3" fill="transparent"/><circle cx="${circleX}" cy="${rowY+9}" r="7" fill="var(--ladder-theme-color)" fill-opacity=".22" stroke="#b28766" stroke-width="1.1"/><text x="${circleX}" y="${rowY+11.5}" text-anchor="middle" fill="var(--ladder-theme-color)" style="font:7px var(--sans)">破</text><text x="${circleX+9}" y="${rowY+12}" class="vl-name${isLadderGrowthStock(stock.code)?' vl-growth-name':''}" role="link" tabindex="0" data-vl-broken-link="${esc(stock.id)}" aria-label="${esc(label)} · 单击聚焦该股（保持布局），双击或回车进入个股页面">${esc(stock.name)}</text></g>`);});chips.push('</g>');
+      topic.stocks.forEach((stock,index)=>{const rowY=y+3+index*20;points.set(stock.id,{x:circleX-7,y:cardY+rowY+9,group:groupId,row:rows.find(row=>row.level===0)});const label=stock.name+' '+stock.code+' · '+fmtDate(stock.date)+' · '+topic.theme+' · 破板';chips.push(`<g class="vl-stock"><title>${esc(label)}</title><rect x="${circleX-8}" y="${rowY}" width="${x+labelWidth-circleX+6}" height="18" rx="3" fill="transparent"/><circle cx="${circleX}" cy="${rowY+9}" r="7" fill="var(--ladder-theme-color)" fill-opacity=".22" stroke="#b28766" stroke-width="1.1"/><text x="${circleX}" y="${rowY+11.5}" text-anchor="middle" fill="var(--ladder-theme-color)" style="font:7px var(--sans)">破</text><text x="${circleX+9}" y="${rowY+12}" class="vl-name${isLadderGrowthStock(stock.code)?' vl-growth-name':''}" role="link" tabindex="0" data-vl-broken-link="${esc(stock.id)}" aria-label="${esc(label)} · 单击聚焦该股（保持布局），双击或回车进入个股页面">${esc(stock.name)}</text></g>`);});chips.push('</g>');retainLadderCard(chips,cardStart,groupId,cardY,previousCards,nextCards,view);
     }
     const higherFailedTopics=new Map();
     for(const stock of data.unpromotedStocks||[]){const level=ladderFailedLevel(stock);if(level<2||!days.includes(stock.date)||higherGroups.has(stock.date+':'+level+':'+stock.theme))continue;const key=stock.date+':'+level;if(!higherFailedTopics.has(key))higherFailedTopics.set(key,new Map());const topics=higherFailedTopics.get(key);if(!topics.has(stock.theme))topics.set(stock.theme,[]);topics.get(stock.theme).push(stock);}
@@ -1404,7 +1438,8 @@
     view.aggregateInitialized||=new Set();for(const [broken,lists] of [[false,failedTopicLists],[true,brokenTopicLists]])for(const day of lists.keys()){const key=failedKey(day,broken);if(view.aggregateInitialized.has(key))continue;view.aggregateInitialized.add(key);if(compactLayout||!(broken?view.foldBreakThemes:view.foldOtherThemes))view.expandedUnpromoted.add(key);}
     for(const key of higherFailedTopics.keys()){const [day,rawLevel]=key.split(':'),level=Number(rawLevel),summaryKey=failedKey(day,false,level);if(view.aggregateInitialized.has(summaryKey))continue;view.aggregateInitialized.add(summaryKey);if(compactLayout||!(level===2?view.foldSecondFailed:view.foldHigherFailed))view.expandedUnpromoted.add(summaryKey);}
     const failedHeight=(day,broken=false,level=1)=>{const topics=failedTopics(day,broken,level);return topics.length?26+(view.expandedUnpromoted.has(failedKey(day,broken,level))?4+topics.reduce((sum,topic)=>sum+Math.max(18,topic.stocks.length*18)+6,0):0):0;};
-    function appendFailedTopics(col,y,broken=false,level=1){
+    function appendFailedTopics(col,cardY,broken=false,level=1){
+      const y=0,cardStart=chips.length;
       const topics=failedTopics(col.day,broken,level);if(!topics.length)return;
       const expanded=view.expandedUnpromoted.has(failedKey(col.day,broken,level)),stockWidth=Math.max(32,...topics.flatMap(topic=>topic.stocks.map(stock=>16+textWidth(stock.name,8)))),themeWidth=Math.max(0,...topics.map(topic=>textWidth(topic.theme,7.2)))+17,w=expanded?Math.min(column-48,Math.max(labelWidth,themeWidth+3+stockWidth+8)):labelWidth,h=failedHeight(col.day,broken,level),x=col.x+col.width-18-w,headerY=y+13,count=topics.length,stockCount=topics.reduce((sum,topic)=>sum+topic.stocks.length,0),color='#8c9299',headerCircle=x+(w-(level>=2?44:52))/2+8,title=`${fmtDate(col.day)} · ${stockCount}只股票 / ${count}个${level>=2?'未晋级题材':broken?'破板题材':'其他题材'} · ${expanded?'收起':'展开'}`;
       chips.push(`<g data-vl-aggregate-themes="${esc(JSON.stringify(topics.map(topic=>topic.theme)))}" data-vl-failed-summary="${col.day}" data-vl-aggregate-level="${level}" data-vl-aggregate-kind="${broken?'broken':'other'}"><rect class="vl-group-box" x="${x}" y="${y}" width="${w}" height="${h}" rx="5" fill="var(--paper)" stroke="${color}" stroke-opacity=".5" stroke-width=".65"/><g class="vl-stock" role="button" tabindex="0" aria-label="${esc(title)}" aria-expanded="${expanded}" data-vl-unpromoted-toggle="${failedKey(col.day,broken,level)}"><title>${esc(title)}</title><rect x="${x+2}" y="${y+2}" width="${w-4}" height="22" rx="3" fill="transparent"/><circle cx="${headerCircle}" cy="${headerY}" r="8.5" fill="${color}" fill-opacity=".14" stroke="${color}" stroke-width=".7"/><line x1="${headerCircle-5}" y1="${headerY+5}" x2="${headerCircle+5}" y2="${headerY-5}" stroke="#747b83" stroke-width=".6"/><text x="${headerCircle-3.3}" y="${headerY-1}" text-anchor="middle" fill="#747b83" style="font:${stockCount>99?4.7:5.5}px var(--mono)">${stockCount}</text><text x="${headerCircle+3.3}" y="${headerY+5}" text-anchor="middle" fill="#747b83" style="font:${count>99?4.7:5.5}px var(--mono)">${count}</text><text x="${headerCircle+11}" y="${headerY+2.8}" fill="var(--ink)" style="font:8px var(--sans)">${level>=2?'未晋级':'其他题材'}</text></g>`);
@@ -1418,7 +1453,7 @@
           });chips.push(`</g>`);rowY+=topicHeight+6;
         }
       }
-      chips.push(`</g>`);
+      chips.push(`</g>`);retainLadderCard(chips,cardStart,failedKey(col.day,broken,level),cardY,previousCards,nextCards,view);
     }
 
     const countSealed=(view.stockOnly?fullData.sealedStocks:data.sealedStocks)||sealedNodes;const groupCounts=new Map();for(const node of countSealed){if(node.status!=='sealed')continue;const key=node.date+':'+Math.min(node.board,5)+':'+node.theme;groupCounts.set(key,(groupCounts.get(key)||0)+1);}
@@ -1445,23 +1480,24 @@
     if(view.expandOnCompact){for(const key of view.aggregateInitialized)view.expandedUnpromoted.add(key);for(const key of unpromotedGroups.keys())view.expandedUnpromoted.add(key);view.foldOtherThemes=false;view.foldBreakThemes=false;view.foldSecondFailed=false;view.foldHigherFailed=false;view.expandOnCompact=false;}
     const rowPadding=compactLayout?6:12,groupGap=compactLayout?5:9;let yy=compactLayout?4:8;
     for(const level of levels){let rowHeight=compactLayout?36:70;for(const col of columns.filter(col=>filterDays.has(col.day))){const list=groups.get(col.day+':'+level),lanes=1;let h=rowPadding;for(let i=0;i<list.length;i+=lanes)h+=Math.max(...list.slice(i,i+lanes).map(g=>groupHeight(g[1])))+groupGap;if(level>=2&&failedHeight(col.day,false,level))h+=failedHeight(col.day,false,level)+groupGap;if(level===0)h+=(brokenStandaloneTopics.get(col.day)||[]).reduce((sum,topic)=>sum+brokenCardHeight(topic)+groupGap,0);if((level===1||level===0)&&failedHeight(col.day,level===0))h+=failedHeight(col.day,level===0)+groupGap;rowHeight=Math.max(rowHeight,h+(compactLayout?8:24));}rows.push({level,y:yy,height:rowHeight});yy+=rowHeight;}
+    markPaint('data');
     const rowClip=level=>`url(#vl-row-clip-${view.id}-${level})`;
     for(const row of rows){chips.push(`<g clip-path="${rowClip(row.level)}">`);background.push(`<line x1="${left}" x2="${width}" y1="${row.y}" y2="${row.y}" class="ladder-grid"/>`);
       for(const col of columns){const list=groups.get(col.day+':'+row.level),lanes=1;let y=row.y+rowPadding;
         for(let i=0;i<list.length;i+=lanes){const pair=list.slice(i,i+lanes),height=Math.max(...pair.map(g=>groupHeight(g[1])));
-          pair.forEach(([theme,items])=>{const x=col.x+col.width-18-labelWidth,h=groupHeight(items),baseHeight=Math.max(25,items.length*20+6),extra=groupExtras.get(items),color=themeColor(theme),id=col.day+':'+row.level+':'+theme,contentLeft=x+(labelWidth-themeSlot-3-stockSlot)/2;
+          const cardY=y;pair.forEach(([theme,items])=>{const y=0,cardStart=chips.length,x=col.x+col.width-18-labelWidth,h=groupHeight(items),baseHeight=Math.max(25,items.length*20+6),extra=groupExtras.get(items),color=themeColor(theme),id=col.day+':'+row.level+':'+theme,contentLeft=x+(labelWidth-themeSlot-3-stockSlot)/2;
             const hasContinuation=items.length>1&&items.some(node=>continuationTargets.has(node.id)),cardInset=hasContinuation?15:0,cardX=x-cardInset,cardWidth=labelWidth+cardInset,inletX=cardX-10,inletY=y+baseHeight/2,count=groupCounts.get(id)??0,previousDay=data.previousDates?.[col.day]||state.dates[state.dates.indexOf(col.day)-1],previousLevel=row.level-1;
             const previousCount=level=>{const key=previousDay+':'+level+':'+theme;return (groupCounts.get(key)||0)+(suspensionCounts.get(key)||0);},denominator=row.level===1?null:row.level===5?previousCount(4)+previousCount(5):previousCount(previousLevel),ratio=row.level===1?String(count):count+'/'+denominator,countLabel=row.level===1?`${fmtDate(col.day)} · ${theme} · 首板 ${count}`:`${fmtDate(col.day)} · ${theme} · ${row.level===5?'高板':row.level+'板'} ${count} / ${fmtDate(previousDay)} ${row.level===5?'四板及以上':previousLevel+'板'} ${denominator}`;
 
             const suspendedCount=row.level===1?0:row.level===5?(suspensionCounts.get(previousDay+':4:'+theme)||0)+(suspensionCounts.get(previousDay+':5:'+theme)||0):(suspensionCounts.get(previousDay+':'+previousLevel+':'+theme)||0),inletLabel=countLabel+(suspendedCount?'（含停牌保留'+suspendedCount+'）':'');
-            positions.set(id,{x:cardX,y,row,width:cardWidth,height:h,day:col.day,theme,items,col,inletX,inletY});
+            positions.set(id,{x:cardX,y:cardY,row,width:cardWidth,height:h,day:col.day,theme,items,col,inletX,inletY:cardY+inletY});
             chips.push(`<g data-vl-colored-theme="${esc(theme)}" data-vl-focus-theme="${esc(theme)}" style="--ladder-theme-color:${color}"><rect class="vl-group-box" data-vl-box-theme="${esc(theme)}" data-vl-ids="${items.map(node=>esc(node.id)).join('|')}" x="${cardX}" y="${y}" width="${cardWidth}" height="${h}" rx="5" fill="var(--paper)" stroke="var(--ladder-theme-color)" stroke-opacity=".4" stroke-width=".65"/>`);
             const inlet=ladderContinuationInlet(items,continuationTargets,ratio,color),isContinuation=inlet.continuation,inletTitle=inletLabel+(isContinuation?' · 续接入口':'');
             chips.push(`<g class="vl-inlet"${isContinuation?` data-vl-relimit-entry="${esc(items[0].id)}" data-vl-ids="${esc(items[0].id)}" data-vl-outcome="relimit-entry"`:''} data-vl-focus-theme="${esc(theme)}" role="button" tabindex="0" aria-label="${esc(inletTitle)}"><title>${esc(inletTitle)}</title><circle cx="${inletX}" cy="${inletY}" r="10" fill="var(--paper)" stroke="${inlet.stroke}" stroke-width=".8"/><text x="${inletX}" y="${inletY+2}" text-anchor="middle" fill="${inlet.ink}" style="font:${ratio.length>5?4.7:ratio.length>4?5.8:6.5}px var(--mono)">${esc(inlet.label)}</text></g>`);
 
             chips.push(`<text x="${contentLeft+themeSlot}" y="${y+baseHeight/2+2.8}" text-anchor="end" class="vl-inline-theme" role="link" tabindex="0" data-vl-topic="${esc(theme)}" data-vl-topic-date="${col.day}" aria-label="${esc(theme)} · ${fmtDate(col.day)} · 单击聚焦题材，双击或回车进入题材页面" fill="var(--ladder-theme-color)">${esc(theme)}</text>`);
             items.forEach((node,j)=>{const badgeStyle=ladderBoardBadgeStyle(node),ny=y+3+j*20,badgeX=contentLeft+themeSlot+3+7,label=`${node.name} ${node.code} · ${fmtDate(node.date)} · ${theme} · ${esc(node.boardPeriod||node.board+'板')}${badgeStyle.label?' · '+badgeStyle.label:''}${node.representative?' · 首板 '+node.firstCount+'：'+node.members.map(m=>m.name).join('、'):''}`;
-              nodeGroup.set(node.id,id);points.set(node.id,{x:badgeX-7,y:ny+9,width:x+labelWidth-badgeX+3,group:id,row});
+              nodeGroup.set(node.id,id);points.set(node.id,{x:badgeX-7,y:cardY+ny+9,width:x+labelWidth-badgeX+3,group:id,row});
               const multi=node.patternDays>node.board,badge=multi?`<path d="M${badgeX-3.8},${ny+12.8} L${badgeX+3.8},${ny+5.2}" stroke="var(--ladder-theme-color)" stroke-width=".5"/><text x="${badgeX-2.6}" y="${ny+7.7}" text-anchor="middle" fill="var(--ladder-theme-color)" style="font:5.4px var(--mono)">${node.board}</text><text x="${badgeX+2.6}" y="${ny+13}" text-anchor="middle" fill="var(--ladder-theme-color)" style="font:5.4px var(--mono)">${node.patternDays}</text>`:`<text x="${badgeX}" y="${ny+11.6}" text-anchor="middle" class="vl-board" fill="var(--ladder-theme-color)">${node.board}</text>`;
               const text=`<g class="vl-stock-board-badge" data-board-style="${badgeStyle.kind}" style="--ladder-badge-color:${badgeStyle.color}">${node.board===1&&restartTargets.has(node.id)?`<rect data-vl-relimit-badge="${esc(node.id)}" x="${badgeX-7}" y="${ny+2}" width="14" height="14" rx=".5"`:`<circle cx="${badgeX}" cy="${ny+9}" r="7"`} fill="var(--ladder-theme-color)" fill-opacity=".22" stroke="var(--ladder-badge-color)" stroke-width="${badgeStyle.kind==='normal'?.6:1.1}"${badgeStyle.dashed?' stroke-dasharray="2 1.4"':''}/>${badge}</g><text x="${badgeX+9}" y="${ny+12}" class="vl-name${isLadderGrowthStock(node.code)?' vl-growth-name':''}" role="link" tabindex="0" data-vl-stock-link="${esc(node.id)}" aria-label="${esc(label)} · 单击聚焦该股（保持布局），双击或回车进入个股页面">${esc(node.name)}</text>`;
 
@@ -1474,7 +1510,7 @@
                 chips.push(`<g class="vl-stock" aria-label="${esc(label)}"><title>${esc(label)}</title><rect x="${circleX-8}" y="${rowY}" width="${x+labelWidth-circleX+6}" height="18" rx="3" fill="transparent"/><circle data-vl-unpromoted-badge="${esc(stock.id)}" cx="${circleX}" cy="${rowY+9}" r="6" fill="var(--ladder-theme-color)" fill-opacity=".22" stroke="${color}" stroke-width=".6"/><text x="${circleX}" y="${rowY+11.5}" text-anchor="middle" fill="var(--ladder-theme-color)" style="font:7px var(--sans)">未</text><text x="${circleX+9}" y="${rowY+12}" class="vl-name${isLadderGrowthStock(stock.code)?' vl-growth-name':''}" role="link" tabindex="0" data-vl-unpromoted-link="${esc(stock.id)}" aria-label="${esc(label)} · 单击聚焦该股（保持布局），双击或回车进入个股页面">${esc(stock.name)}</text></g>`);
               });
             }
-            chips.push(`</g>`);
+            chips.push(`</g>`);retainLadderCard(chips,cardStart,id,cardY,previousCards,nextCards,view);
           });y+=height+groupGap;
         }
         if(row.level>=2)appendFailedTopics(col,y,false,row.level);
@@ -1502,12 +1538,18 @@
       if(!data.links.some(link=>link.source===edge.source))markers.push(`<g data-vl-ids="${esc(edge.source+'|'+edge.target)}" data-vl-outcome="relimit" data-vl-focus-theme="${esc(a.theme)}" aria-label="${esc(description)}"><circle cx="${sx-5.5}" cy="${sy}" r="5.5" fill="#c44f49" fill-opacity=".12" stroke="#c44f49" stroke-width="1"/><text x="${sx-5.5}" y="${sy+2.5}" text-anchor="middle" fill="#c44f49" style="font:7px var(--sans)">续</text></g>`);
       markers.push(ladderContinuationMarkers(edge,nodesById.get(edge.source),node,{sx,sy,tx,ty,entryX,singleEntry,inletX:b.inletX,inletY:b.inletY},textWidth,description));
     }
+    view.cardMarkupCache=nextCards;
     const painted=Boolean(host.querySelector('svg')),oldLeft=host.scrollLeft;
     const markup=`<div class="vl-board-header" style="width:${width}px"><span class="vl-date-corner">板数</span>${columns.map(c=>`<span class="vl-date-day" role="link" tabindex="0" aria-label="${fmtDate(c.day)} · 每日总览" data-vl-date="${c.day}" style="left:${c.x}px;width:${c.width}px">${c.day.slice(4,6)}/${c.day.slice(6)}</span>`).join('')}</div><div class="vl-date-rail">${rows.map(row=>`<span style="top:${row.y}px;height:${row.height}px">${row.level===5?'高板':row.level===1?'首板':row.level===0?'破板':row.level+'板'}</span>`).join('')}</div><svg role="group" aria-label="${view.stockOnly?'单股紧凑天梯 · '+esc(view.focusedStock):compactThemes.size?esc([...compactThemes].join('、'))+'题材紧凑天梯':'日期横轴、板数纵轴的涨停天梯'}" width="${width}" height="${yy+8}" data-vl-height-days="${esc(JSON.stringify([...filterDays].sort()))}"><defs>${rows.map(row=>`<clipPath id="vl-row-clip-${view.id}-${row.level}"><rect x="0" y="${row.y}" width="${width}" height="${row.height}"/></clipPath>`).join('')}</defs>${background.join('')}${columns.map(c=>`<line x1="${c.x}" x2="${c.x}" y1="0" y2="${yy}" class="ladder-date-grid"/>`).join('')}${paths.join('')}${chips.join('')}${markers.join('')}</svg>`;
+    markPaint('markup');
     if(patchPaint){const template=document.createElement('template');template.innerHTML=markup;const shell=document.createElement('div');shell.append(template.content);for(let i=0;i<shell.childNodes.length;i++){if(host.childNodes[i])patchLadderDOM(host.childNodes[i],shell.childNodes[i]);else host.appendChild(shell.childNodes[i].cloneNode(true));}while(host.childNodes.length>shell.childNodes.length)host.lastChild.remove();}else host.innerHTML=markup;
+    const liveCardTokens=new Set([...nextCards.values()].flatMap(records=>records.map(record=>String(record.token))));for(const token of view.cardDOMCache.keys())if(!liveCardTokens.has(token))view.cardDOMCache.delete(token);
+    host.dataset.cardCacheBodies=String([...nextCards.values()].reduce((sum,records)=>sum+records.length,0));host.dataset.cardDomCacheSize=String(view.cardDOMCache.size);
+    markPaint('dom');
     host.scrollLeft=painted?oldLeft:host.scrollWidth-host.clientWidth;
     if(view.rowViewportAnchor){const anchor=view.rowViewportAnchor,row=rows.find(row=>row.level===anchor.level);view.rowViewportAnchor=null;if(row)host.scrollTop=28+row.y+Math.min(anchor.offset,Math.max(0,row.height-1));}
     if(!patchPaint)setupLadderDateSlider(host.querySelector('.vl-board-header'),columns);
+    markPaint('layout');
     const legend=$('#ladderLegend'),selectedThemes=new Set(compactThemes.size?compactThemes:[view.focusedTheme].filter(Boolean));let navigating=false;
     let stockFocusIndex=null;
     const stockCodeFromId=id=>String(id||'').split(':')[1]||'';
@@ -1553,16 +1595,20 @@
       applyStockFocus();
     }
     function toggleAllSummaries(){
+      const toolbarStarted=performance.now();
       const toggles=[...host.querySelectorAll('[data-vl-unpromoted-toggle]')],keys=new Set(toggles.map(toggle=>toggle.dataset.vlUnpromotedToggle)),collapse=toggles.length>0&&toggles.every(toggle=>toggle.getAttribute('aria-expanded')==='true'),top=host.scrollTop;
       view.foldOtherThemes=collapse;view.foldBreakThemes=collapse;view.foldSecondFailed=collapse;view.foldHigherFailed=collapse;view.expandOnCompact=false;
       for(const key of keys){if(collapse)view.expandedUnpromoted.delete(key);else view.expandedUnpromoted.add(key);}
-      view.patchPaint=true;paintLimitupLadder(fullData);host.scrollTop=top;view.updateLegend?.();
+      view.patchPaint=true;paintLimitupLadder(fullData);host.scrollTop=top;view.updateLegend?.();host.dataset.toolbarMs=(performance.now()-toolbarStarted).toFixed(1);
     }
     function showAllExpanded(){
+      const toolbarStarted=performance.now();
+      if(!compactLayout&&!view.focusedStock&&!view.stockOnly&&!view.focusedTheme&&!hiddenLevels.size&&!view.foldOtherThemes&&!view.foldBreakThemes&&!view.foldSecondFailed&&!view.foldHigherFailed&&[...host.querySelectorAll('[data-vl-unpromoted-toggle]')].every(toggle=>toggle.getAttribute('aria-expanded')==='true')){host.dataset.toolbarMs=(performance.now()-toolbarStarted).toFixed(1);return;}
+      if(!compactLayout)view.patchPaint=true;
       view.focusedStock='';view.stockOnly=false;
       const left=host.scrollLeft,top=host.scrollTop;
       view.minBoard=0;view.compactTheme='';view.compactThemes=[];view.focusedTheme='';hiddenLevels.clear();view.expandOnCompact=true;
-      paintLimitupLadder(fullData);host.scrollLeft=left;host.scrollTop=compactLayout?0:top;view.updateLegend?.();
+      paintLimitupLadder(fullData);host.scrollLeft=left;host.scrollTop=compactLayout?0:top;view.updateLegend?.();host.dataset.toolbarMs=(performance.now()-toolbarStarted).toFixed(1);
     }
     function restoreAll(){
       view.focusedStock='';view.stockOnly=false;
@@ -1702,6 +1748,7 @@
     }
 
     function renderVisibleLegend(){
+      const legendStarted=performance.now();
       if(ladderView!==view||view.data!==fullData||!host.isConnected||view.dragging)return;
       const svg=host.querySelector('svg');if(!svg)return;const bounds=host.getBoundingClientRect(),svgBounds=svg.getBoundingClientRect(),scale=svgBounds.width/Number(svg.getAttribute('width')),header=host.querySelector('.vl-board-header').getBoundingClientRect(),rail=host.querySelector('.vl-date-rail').getBoundingClientRect(),clip={left:Math.max(bounds.left,rail.right),right:bounds.right-3,top:Math.max(bounds.top,header.bottom),bottom:bounds.bottom-3};
       const visibleDays=new Set(columns.filter(col=>svgBounds.left+(col.x+col.width)*scale>clip.left&&svgBounds.left+col.x*scale<clip.right).map(col=>col.day)),visibleThemes=new Set();
@@ -1739,14 +1786,14 @@
       const legendTopicDates=new Map();for(const stock of [...(fullData.sealedStocks||[]),...(fullData.unpromotedStocks||[]),...(fullData.brokenStocks||[])]){if(!visibleDays.has(stock.date))continue;const previous=legendTopicDates.get(stock.theme);if(!previous||stock.date>previous)legendTopicDates.set(stock.theme,stock.date);}
       legend.setAttribute('aria-label',`当前可见题材，${rangeLabel}题材宽度，涨停股票按代码去重，按最高连板数分档`);
       const toolbarRange=$('#ladderToolbarRange');if(toolbarRange){toolbarRange.setAttribute('aria-label',`统计日期范围：${rangeLabel}，共${range.length}个交易日`);toolbarRange.innerHTML=`<span title="${esc(rangeLabel)}">${esc(shortRange)}</span><span>共</span><span class="vl-range-count" title="${range.length}个交易日">${range.length}</span><span>交易日</span>`;}
-      if(view.specifiedDayEnabled){renderSpecifiedLegend();return;}
+      if(view.specifiedDayEnabled){renderSpecifiedLegend();host.dataset.legendMs=(performance.now()-legendStarted).toFixed(1);return;}
       legendFactDates=new Set();view.legendStockRecords=new Map();
       const legendMembersByTheme=new Map();for(const stock of [...(fullData.sealedStocks||[]),...(fullData.unpromotedStocks||[]).map(stock=>({...stock,status:'unpromoted'})),...(fullData.brokenStocks||[])]){if(!visibleDays.has(stock.date))continue;if(!legendMembersByTheme.has(stock.theme))legendMembersByTheme.set(stock.theme,[]);legendMembersByTheme.get(stock.theme).push(stock);}
       let legendMarkup=tiers.map(tier=>{const items=[...stats.values()].filter(item=>Math.min(item.highest,5)===tier.level&&(tier.level!==1||item.count>1)).sort((a,b)=>b.highest-a.highest||b.count-a.count||a.name.localeCompare(b.name,'zh-CN'));return `<section class="vl-legend-tier${minBoard&&tier.level<minBoard?' vl-tier-below':''}" aria-label="${tier.label}"><h4><input type="checkbox" class="vl-tier-visibility" data-vl-row-level="${tier.level}" aria-label="显示${tier.label}行" ${hiddenLevels.has(tier.level)?'':'checked'}/><button type="button" class="vl-tier-filter" data-vl-min-board="${tier.level}" aria-pressed="${tier.level===1?!view.foldOtherThemes:minBoard===tier.level}" aria-label="${tier.level===1?'首板：全部展开或收起其他题材':tier.label+'：只显示最高板数达到'+tier.level+'板及以上的题材'}" title="${tier.level===1?'全部展开或收起其他题材':minBoard===tier.level?'再次点击恢复全部':'筛选最高板数达到该档及以上的题材'}">${tier.label}</button>${tier.level===5?legendStockControl():''}</h4><div class="vl-legend-items">${items.map(item=>{const title=item.name+' · 最高'+item.highest+'板 · '+shortRange+'涨停股票去重'+item.count+'只',countMarkup=`<span class="vl-legend-count" style="--theme-color:${themeColor(item.name)};--legend-count-size:${Math.min(26,12+2*Math.sqrt(Math.max(0,item.count-1))).toFixed(1)}px">${item.count}</span>`,topicMarkup=`<span class="vl-legend-topic-name" data-vl-topic-dates="${esc(JSON.stringify([...visibleDays].sort()))}" data-vl-topic="${esc(item.name)}" data-vl-topic-date="${legendTopicDates.get(item.name)||lastDay}">${esc(item.name)}</span>`;return legendThemeEntry(tier.level,item.name,countMarkup,topicMarkup,title,legendMembersByTheme.get(item.name)||[]);}).join('')}</div></section>`;}).join('');
       const classifiedThemes=new Set([...(fullData.sealedStocks||[]),...(fullData.unpromotedStocks||[])].filter(stock=>visibleDays.has(stock.date)).map(stock=>stock.theme));
       const breakStats=new Map();for(const stock of fullData.brokenStocks||[]){if(!visibleDays.has(stock.date)||classifiedThemes.has(stock.theme))continue;if(!breakStats.has(stock.theme))breakStats.set(stock.theme,new Set());breakStats.get(stock.theme).add(stock.code);}
       legendMarkup+=`<section class="vl-legend-tier" aria-label="破板"><h4><input type="checkbox" class="vl-tier-visibility" data-vl-row-level="0" aria-label="显示破板行" ${hiddenLevels.has(0)?'':'checked'}/><button type="button" class="vl-tier-filter" data-vl-break-toggle aria-label="破板：全部展开或收起" aria-expanded="${!view.foldBreakThemes}">破板</button></h4><div class="vl-legend-items">${[...breakStats].filter(([,codes])=>codes.size>1).sort((a,b)=>b[1].size-a[1].size||a[0].localeCompare(b[0],'zh-CN')).map(([theme,codes])=>{const title=theme+' · 首板破板股票去重'+codes.size,countMarkup=`<span class="vl-legend-count" style="--theme-color:${themeColor(theme)};--legend-count-size:${Math.min(26,12+2*Math.sqrt(Math.max(0,codes.size-1))).toFixed(1)}px">${codes.size}</span>`,topicMarkup=`<span class="vl-legend-topic-name" data-vl-topic-dates="${esc(JSON.stringify([...visibleDays].sort()))}" data-vl-topic="${esc(theme)}" data-vl-topic-date="${legendTopicDates.get(theme)||lastDay}">${esc(theme)}</span>`;return legendThemeEntry(0,theme,countMarkup,topicMarkup,title,(legendMembersByTheme.get(theme)||[]).filter(stock=>stock.status==='broken'));}).join('')}</div></section>`;
-      const fresh=legend.cloneNode(false);fresh.innerHTML=legendMarkup;patchLadderLegend(legend,fresh);finishLegendStocks();
+      const fresh=legend.cloneNode(false);fresh.innerHTML=legendMarkup;patchLadderLegend(legend,fresh);finishLegendStocks();host.dataset.legendMs=(performance.now()-legendStarted).toFixed(1);
     }
     view.updateLegend=()=>{if(view.legendFrame)cancelAnimationFrame(view.legendFrame);view.legendFrame=requestAnimationFrame(()=>{view.legendFrame=0;renderVisibleLegend();});};
     legend.onchange=event=>{const all=event.target.closest('[data-vl-legend-stock-all]');if(all){event.stopPropagation();view.legendStocksAll=all.checked;view.legendStockOverrides.clear();view.legendStockErrors.clear();view.refreshLegendStocks();return;}const input=event.target.closest('[data-vl-row-level]');if(!input)return;const level=Number(input.dataset.vlRowLevel);if(input.checked)hiddenLevels.delete(level);else hiddenLevels.add(level);const top=host.scrollTop;paintLimitupLadder(fullData);host.scrollTop=Math.min(top,Math.max(0,host.scrollHeight-host.clientHeight));view.updateLegend?.();};
@@ -1770,7 +1817,7 @@
       if(view.specifiedDayEnabled)refreshSpecifiedLegend();else view.specifiedLegendRequestId++;
     };
     if(view.specifiedDayEnabled)refreshSpecifiedLegend();
-    view.updateLegend();host.dataset.paintMs=(performance.now()-paintStarted).toFixed(1);
+    view.updateLegend();host.dataset.paintMs=(performance.now()-paintStarted).toFixed(1);markPaint('total');host.dataset.paintProfile=JSON.stringify(paintProfile);
 
   }
   function openLimitupLadder(){syncBrowserRoute('ladder',state.date);renderLimitupLadder();}
