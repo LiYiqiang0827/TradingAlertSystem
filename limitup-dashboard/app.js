@@ -855,7 +855,7 @@
   function ladderLegendStockVisible(view,theme){return view.legendStockOverrides?.get(theme)??Boolean(view.legendStocksAll);}
   function ladderLegendStockRow(stock,facts){
     const raw=facts?.pct??stock.pct,pct=Number(raw),hasPct=raw!=null&&raw!==''&&Number.isFinite(pct),pctText=hasPct?(pct>0?'+':'')+pct.toFixed(2)+'%':'—',tone=hasPct?(pct>0?'pct-up':pct<0?'pct-down':''):'',time=stock.status==='unpromoted'&&!stock.touchedLimit?'':stock.time||facts?.time||'',amount=stock.status==='sealed'?compactBoardAmount(facts?.sealAmount):'—',badge=stock.status==='sealed'?ladderHoverBoardBadge(stock):ladderHoverOutcomeBadge(stock),label=stock.status==='unpromoted'?'未晋级 · 昨'+(stock.previousBoardPeriod||stock.previousBoard+'板'):stock.status==='broken'?'破板':stock.boardPeriod;
-    return `<button type="button" class="vl-legend-stock-row" data-vl-legend-stock="${esc(stock.id)}" aria-label="${esc(stock.name+' · '+label+' · '+fmtDate(stock.date))}" title="${esc(fmtDate(stock.date)+' · '+stock.name+' · '+label+' · 涨幅 '+pctText+' · 涨停时间 '+(time||'—')+' · 封板金额 '+amount+' · 单击显示题材内的单股紧凑脉络，双击查看个股')}" style="--ladder-theme-color:${ladderThemeColor(stock.theme)}">${badge}<span class="vl-legend-stock-name${isLadderGrowthStock(stock.code)?' vl-hover-growth-name':''}">${esc(stock.name)}</span><span class="vl-legend-stock-pct ${tone}">${esc(pctText)}</span><time>${esc(time||'—')}</time><span class="vl-legend-stock-amount">${esc(amount)}</span></button>`;
+    return `<button type="button" class="vl-legend-stock-row" data-vl-legend-stock="${esc(stock.id)}" aria-label="${esc(stock.name+' · '+label+' · '+fmtDate(stock.date))}" title="${esc(fmtDate(stock.date)+' · '+stock.name+' · '+label+' · 涨幅 '+pctText+' · 涨停时间 '+(time||'—')+' · 封板金额 '+amount+' · 单击显示题材内的单股紧凑脉络，双击查看个股')}" style="--ladder-theme-color:${ladderThemeColor(stock.theme)}">${badge}<span data-vl-stock-preview="${esc(stock.id)}" class="vl-legend-stock-name${isLadderGrowthStock(stock.code)?' vl-hover-growth-name':''}">${esc(stock.name)}</span><span class="vl-legend-stock-pct ${tone}">${esc(pctText)}</span><time>${esc(time||'—')}</time><span class="vl-legend-stock-amount">${esc(amount)}</span></button>`;
   }
   function ladderSelectStockPath(view,stock,fullData){
     const canonical=[...(fullData.sealedStocks||[]),...(fullData.unpromotedStocks||[]),...(fullData.brokenStocks||[])].find(node=>node.id===stock.id)||stock,theme=canonical.theme||stock.theme;
@@ -902,7 +902,7 @@
   }
   let ladderStockHover=null,ladderStockHoverContext=null;
   const ladderStockHoverRequests=new Map();
-  const ladderStockPreviewSelector='#ladderChart [data-vl-stock-link],#ladderChart [data-vl-unpromoted-link],#ladderChart [data-vl-broken-link],#ladderTopicHover [data-vl-stock-preview],#ladderNestedThemeHover [data-vl-stock-preview]';
+  const ladderStockPreviewSelector='#ladderLegend .vl-legend-stock-name[data-vl-stock-preview],#ladderChart [data-vl-stock-link],#ladderChart [data-vl-unpromoted-link],#ladderChart [data-vl-broken-link],#ladderTopicHover [data-vl-stock-preview],#ladderNestedThemeHover [data-vl-stock-preview]';
   function closeLadderStockHover(){
     const hover=ladderStockHover;if(!hover)return;clearTimeout(hover.showTimer);clearTimeout(hover.hideTimer);hover.requestId++;hover.anchor=null;hover.card.hidden=true;hover.resizeObserver?.disconnect();hover.resizeObserver=null;
     for(const id of hover.chartIds){try{window.klinecharts.dispose(id);}catch{}}hover.chartIds=[];hover.charts=[];hover.card.replaceChildren();
@@ -959,10 +959,17 @@
     const pct=data?.pct??bar?.pct_chg,turnover=data?.freeFloatTurnover,amount=bar?.amount==null?data?.amount:Number(bar.amount)*1000,items=[['日期',day.slice(4,6)+'/'+day.slice(6),fmtDate(day)],['收',price(bar?.close),'收盘（前复权）'],['开',price(bar?.open),'开盘（前复权）'],['高',price(bar?.high),'最高（前复权）'],['低',price(bar?.low),'最低（前复权）'],['量',volume(bar?.volume),'成交量（手）'],['额',compactYuan(amount),'成交额'],['换',turnover==null?'—':Number(turnover).toFixed(2)+'%','自由换手率'],['幅',percent(pct),'涨跌幅']];
     return `<span class="vl-daily-quote" aria-label="日K行情">${items.map(([label,value,title])=>`<span class="vl-daily-stat" title="${esc(title+'：'+value)}">${label==='日期'?'':`<i>${label}</i>`}<b${label==='幅'&&pct!=null?` class="${Number(pct)>0?'pct-up':Number(pct)<0?'pct-down':''}"`:''}>${esc(value)}</b></span>`).join('')}</span>`;
   }
+  function ladderStockHoverRecord(context,anchor){
+    const id=anchor.dataset.vlStockLink||anchor.dataset.vlUnpromotedLink||anchor.dataset.vlBrokenLink||anchor.dataset.vlStockPreview;
+    // The selected-day legend may contain a date outside the loaded chart window.
+    const stock=(anchor.closest('#ladderLegend')?context.view.legendStockRecords?.get(id):null)||context.stocks.get(id);if(stock)return stock;
+    const [date,code]=String(id||'').split(':'),prior=[...context.stocks.values()].filter(stock=>stock.code===code&&stock.date<=date).sort((a,b)=>b.date.localeCompare(a.date))[0];
+    if(!prior)return null;const failed=/:(?:unpromoted|failed)$/.test(id);
+    return {...prior,id,date,name:anchor.textContent.trim(),status:failed?'unpromoted':prior.status,...(failed?{previousBoard:prior.board,previousBoardPeriod:prior.boardPeriod}:{})};
+  }
   async function showLadderStockHover(anchor){
     const context=ladderStockHoverContext;if(!context||ladderView!==context.view||context.view.dragging||context.view.data!==context.fullData||history.state?.view!=='ladder'||!anchor.isConnected)return;
-    const id=anchor.dataset.vlStockLink||anchor.dataset.vlUnpromotedLink||anchor.dataset.vlBrokenLink||anchor.dataset.vlStockPreview;let stock=context.stocks.get(id);
-    if(!stock){const [date,code]=String(id||'').split(':'),prior=[...context.stocks.values()].filter(stock=>stock.code===code&&stock.date<=date).sort((a,b)=>b.date.localeCompare(a.date))[0];if(prior){const failed=/:(?:unpromoted|failed)$/.test(id);stock={...prior,id,date,name:anchor.textContent.trim(),status:failed?'unpromoted':prior.status,...(failed?{previousBoard:prior.board,previousBoardPeriod:prior.boardPeriod}:{})};}}
+    const stock=ladderStockHoverRecord(context,anchor);
     if(!stock)return;const fromRoster=Boolean(anchor.closest('#ladderTopicHover,#ladderNestedThemeHover'));
     if(!fromRoster)closeLadderTopicHover();else{if(ladderTopicHover)clearTimeout(ladderTopicHover.hideTimer);if(ladderNestedThemeHover)clearTimeout(ladderNestedThemeHover.hideTimer);}
     const hover=ensureLadderStockHover();closeLadderStockHover();hover.anchor=anchor;const requestId=++hover.requestId;
