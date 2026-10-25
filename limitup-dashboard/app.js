@@ -1334,8 +1334,9 @@
     const kind=edge.kind||'continuous';
     return group+'|'+kind+(kind!=='continuous'?'|'+edge.source:'');
   }
-  function ladderContinuationInletLabel(items,targets,ratio){
-    return items.length===1&&targets.has(items[0].id)?'续':ratio;
+  function ladderContinuationInlet(items,targets,ratio,color){
+    const continuation=items.length===1&&targets.has(items[0].id);
+    return {label:ratio,continuation,stroke:continuation?color:'#8c9299',ink:continuation?color:'#747b83'};
   }
   function ladderContinuationMarkers(edge,sourceNode,targetNode,geometry,measure,description){
     const {sx,sy,tx,ty,entryX,singleEntry,inletX,inletY}=geometry,ids=esc(edge.source+'|'+edge.target),theme=esc(targetNode.theme),short=day=>day.slice(4,6)+'/'+day.slice(6),exitText=short(edge.targetDate)+' · '+edge.sessions+'日后 · '+targetNode.name;
@@ -1455,8 +1456,8 @@
             const suspendedCount=row.level===1?0:row.level===5?(suspensionCounts.get(previousDay+':4:'+theme)||0)+(suspensionCounts.get(previousDay+':5:'+theme)||0):(suspensionCounts.get(previousDay+':'+previousLevel+':'+theme)||0),inletLabel=countLabel+(suspendedCount?'（含停牌保留'+suspendedCount+'）':'');
             positions.set(id,{x:cardX,y,row,width:cardWidth,height:h,day:col.day,theme,items,col,inletX,inletY});
             chips.push(`<g data-vl-colored-theme="${esc(theme)}" data-vl-focus-theme="${esc(theme)}" style="--ladder-theme-color:${color}"><rect class="vl-group-box" data-vl-box-theme="${esc(theme)}" data-vl-ids="${items.map(node=>esc(node.id)).join('|')}" x="${cardX}" y="${y}" width="${cardWidth}" height="${h}" rx="5" fill="var(--paper)" stroke="var(--ladder-theme-color)" stroke-opacity=".4" stroke-width=".65"/>`);
-            const inletDisplay=ladderContinuationInletLabel(items,continuationTargets,ratio),isContinuation=inletDisplay==='续',inletTitle=inletLabel+(isContinuation?' · 续接入口':'');
-            chips.push(`<g class="vl-inlet"${isContinuation?` data-vl-relimit-entry="${esc(items[0].id)}" data-vl-ids="${esc(items[0].id)}" data-vl-outcome="relimit-entry"`:''} data-vl-focus-theme="${esc(theme)}" role="button" tabindex="0" aria-label="${esc(inletTitle)}"><title>${esc(inletTitle)}</title><circle cx="${inletX}" cy="${inletY}" r="10" fill="var(--paper)" stroke="${isContinuation?'#b66b43':'#8c9299'}" stroke-width=".8"/><text x="${inletX}" y="${inletY+2}" text-anchor="middle" fill="${isContinuation?'#b66b43':'#747b83'}" style="font:${isContinuation?8:ratio.length>5?4.7:ratio.length>4?5.8:6.5}px var(--mono)">${esc(inletDisplay)}</text></g>`);
+            const inlet=ladderContinuationInlet(items,continuationTargets,ratio,color),isContinuation=inlet.continuation,inletTitle=inletLabel+(isContinuation?' · 续接入口':'');
+            chips.push(`<g class="vl-inlet"${isContinuation?` data-vl-relimit-entry="${esc(items[0].id)}" data-vl-ids="${esc(items[0].id)}" data-vl-outcome="relimit-entry"`:''} data-vl-focus-theme="${esc(theme)}" role="button" tabindex="0" aria-label="${esc(inletTitle)}"><title>${esc(inletTitle)}</title><circle cx="${inletX}" cy="${inletY}" r="10" fill="var(--paper)" stroke="${inlet.stroke}" stroke-width=".8"/><text x="${inletX}" y="${inletY+2}" text-anchor="middle" fill="${inlet.ink}" style="font:${ratio.length>5?4.7:ratio.length>4?5.8:6.5}px var(--mono)">${esc(inlet.label)}</text></g>`);
 
             chips.push(`<text x="${contentLeft+themeSlot}" y="${y+baseHeight/2+2.8}" text-anchor="end" class="vl-inline-theme" role="link" tabindex="0" data-vl-topic="${esc(theme)}" data-vl-topic-date="${col.day}" aria-label="${esc(theme)} · ${fmtDate(col.day)} · 单击聚焦题材，双击或回车进入题材页面" fill="var(--ladder-theme-color)">${esc(theme)}</text>`);
             items.forEach((node,j)=>{const badgeStyle=ladderBoardBadgeStyle(node),ny=y+3+j*20,badgeX=contentLeft+themeSlot+3+7,label=`${node.name} ${node.code} · ${fmtDate(node.date)} · ${theme} · ${esc(node.boardPeriod||node.board+'板')}${badgeStyle.label?' · '+badgeStyle.label:''}${node.representative?' · 首板 '+node.firstCount+'：'+node.members.map(m=>m.name).join('、'):''}`;

@@ -19,9 +19,14 @@ assert.notEqual(scope.ladderPromotionPortKey(group,a),scope.ladderPromotionPortK
 assert.notEqual(scope.ladderPromotionPortKey(group,{...a,kind:'suspension'}),scope.ladderPromotionPortKey(group,{...b,kind:'suspension'}));
 assert.equal(scope.ladderPromotionPortKey(group,{...a,kind:'continuous'}),scope.ladderPromotionPortKey(group,{...b,kind:'continuous'}));
 const targets=new Set(['target:A']);
-assert.equal(scope.ladderContinuationInletLabel([{id:'target:A'}],targets,'1/3'),'续');
-assert.equal(scope.ladderContinuationInletLabel([{id:'target:A'},{id:'target:B'}],targets,'2/3'),'2/3');
-assert.equal(scope.ladderContinuationInletLabel([{id:'target:B'}],targets,'1/3'),'1/3');
+// A single-stock continuation keeps its count/ratio; only the original circle adopts the theme color.
+let inlet=scope.ladderContinuationInlet([{id:'target:A'}],targets,'1/3','#c58b4b');
+assert.equal(inlet.label,'1/3');assert(inlet.continuation);assert.equal(inlet.stroke,'#c58b4b');assert.equal(inlet.ink,'#c58b4b');
+inlet=scope.ladderContinuationInlet([{id:'target:A'}],targets,'9','#c58b4b');assert.equal(inlet.label,'9');
+inlet=scope.ladderContinuationInlet([{id:'target:A'},{id:'target:B'}],targets,'2/3','#c58b4b');
+assert.equal(inlet.label,'2/3');assert(!inlet.continuation);assert.equal(inlet.stroke,'#8c9299');
+inlet=scope.ladderContinuationInlet([{id:'target:B'}],targets,'1/3','#c58b4b');
+assert.equal(inlet.label,'1/3');assert(!inlet.continuation);assert.equal(inlet.ink,'#747b83');
 const recovery={source:'source:A',target:'target:A',name:'凡拓数创',sourceBoard:2,failureDate:'20261021',targetDate:'20261023',sessions:2};
 const geometry={sx:100,sy:40,tx:200,ty:70,entryX:205.5,singleEntry:false,inletX:190,inletY:50};
 html=scope.ladderContinuationMarkers(recovery,{board:2},{name:'凡拓数创',theme:'机器人概念'},geometry,measure,'恢复');
