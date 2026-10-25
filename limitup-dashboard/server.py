@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Local read-only API for the TradingAlert limit-up dashboard prototype."""
 from __future__ import annotations
-import json, os, re, sqlite3, sys, datetime, traceback, calendar, bisect, math, hashlib
+import json, os, re, sqlite3, sys, datetime, traceback, calendar, bisect, math, hashlib, threading, gzip
 from functools import lru_cache
+from contextlib import closing
 from http.server import ThreadingHTTPServer, SimpleHTTPRequestHandler
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -260,6 +261,7 @@ class Cache:
     """Use Redis if reachable; keep a persistent SQLite cache as the fallback."""
     def __init__(self):
         self.redis=None
+        self.lock=threading.RLock()
         url=os.environ.get("TRADINGALERT_REDIS_URL","redis://127.0.0.1:6379/2")
         try:
             import redis
@@ -276,16 +278,19 @@ class Cache:
         if self.redis:
             value=self.redis.get(key)
             return json.loads(value) if value else None
-        row=self.db.execute("select value,expires from cache where key=?",(key,)).fetchone()
-        if not row: return None
-        if row[1]<now:
-            self.db.execute("delete from cache where key=?",(key,)); self.db.commit(); return None
-        return json.loads(row[0])
+        with self.lock:
+            row=self.db.execute("select value,expires from cache where key=?",(key,)).fetchone()
+            if not row: return None
+            if row[1]<=now:
+                self.db.execute("delete from cache where key=?",(key,)); self.db.commit(); return None
+            return json.loads(row[0])
+
     def set(self,key,value,ttl=21600):
         raw=json.dumps(value,ensure_ascii=False,separators=(",",":"),allow_nan=False)
         if self.redis: self.redis.setex(key,ttl,raw)
         else:
-            self.db.execute("insert or replace into cache values (?,?,?)",(key,raw,int(datetime.datetime.now().timestamp())+ttl)); self.db.commit()
+            with self.lock:
+                self.db.execute("insert or replace into cache values (?,?,?)",(key,raw,int(datetime.datetime.now().timestamp())+ttl)); self.db.commit()
 
 CACHE=None
 
@@ -374,10 +379,36 @@ def neo4j_review(date):
             "conclusion":"","topics":topics,"totalStocks":len(unique_codes),
             "analysisSource":"neo4j"}
 
+def database_revision(paths):
+    revision=[]
+    for path in paths:
+        for candidate in (path,Path(str(path)+"-wal")):
+            try: stat=candidate.stat()
+            except FileNotFoundError: continue
+            if str(candidate).endswith('-wal') and stat.st_size<=32: continue
+            revision.append((str(candidate),stat.st_size,stat.st_mtime_ns))
+    return hashlib.sha256(repr(revision).encode()).hexdigest()[:16]
+
+
+_market_dates_lock=threading.RLock()
+_market_dates_snapshot=None
+
 def market_data_dates():
+    global _market_dates_snapshot
+    with _market_dates_lock:
+        revision=database_revision((KPL_DB,BASIC_DB))
+        if _market_dates_snapshot and _market_dates_snapshot[0]==revision:
+            return list(_market_dates_snapshot[1])
+        dates,complete=_read_market_data_dates()
+        if complete and revision==database_revision((KPL_DB,BASIC_DB)):
+            _market_dates_snapshot=(revision,tuple(dates))
+        return dates
+
+
+def _read_market_data_dates():
     """Dates are driven by the available limit-up market snapshots, not graph attribution."""
-    dates=set()
-    with sqlite3.connect(f"file:{KPL_DB}?mode=ro",uri=True,timeout=3) as c:
+    dates=set();complete=True
+    with closing(sqlite3.connect(f"file:{KPL_DB}?mode=ro",uri=True,timeout=3)) as c:
         tables={r[0] for r in c.execute("select name from sqlite_master where type='table'")}
         if "tbl_cn_kpl_list" in tables:
             dates.update(str(r[0]) for r in c.execute("SELECT DISTINCT trade_date FROM tbl_cn_kpl_list WHERE tag='涨停' AND trade_date IS NOT NULL"))
@@ -388,7 +419,7 @@ def market_data_dates():
     dates={day for day in dates if re.fullmatch(r"\d{8}",day)}
     if BASIC_DB.exists():
         try:
-            with sqlite3.connect(f"file:{BASIC_DB}?mode=ro",uri=True,timeout=3) as c:
+            with closing(sqlite3.connect(f"file:{BASIC_DB}?mode=ro",uri=True,timeout=3)) as c:
                 tables={r[0] for r in c.execute("select name from sqlite_master where type='table'")}
                 calendar_table="tbl_cn_stk_limit" if "tbl_cn_stk_limit" in tables else "tbl_cn_day" if "tbl_cn_day" in tables else None
                 if calendar_table:
@@ -402,8 +433,9 @@ def market_data_dates():
                             f"WITH candidates(trade_date) AS (VALUES {values}) SELECT trade_date FROM candidates WHERE EXISTS (SELECT 1 FROM {calendar_table} actual WHERE actual.trade_date=candidates.trade_date)",batch))
                     dates.intersection_update(valid_days)
         except Exception as exc:
+            complete=False
             print(f"[review] trading-date filter unavailable: {type(exc).__name__}: {exc}",flush=True)
-    return sorted(dates)
+    return sorted(dates),complete
 
 def market_topics(date, report, pool):
     """Assign each limit-up stock to its single KPL performance theme."""
@@ -1046,12 +1078,19 @@ def shift_months(day, months):
     year,month=divmod(month_index,12); month+=1
     return day.replace(year=year,month=month,day=min(day.day,calendar.monthrange(year,month)[1]))
 
+_cache_load_locks=tuple(threading.RLock() for _ in range(32))
+
 def cached_series(key, loader, ttl=7*24*3600):
     value=CACHE.get(key)
     if value is None:
-        value=loader()
-        CACHE.set(key,value,ttl)
+        # Collapse simultaneous cold requests without retaining one lock per key.
+        with _cache_load_locks[hash(key)%len(_cache_load_locks)]:
+            value=CACHE.get(key)
+            if value is None:
+                value=loader()
+                CACHE.set(key,value,ttl)
     return value
+
 
 def is_closed_limit_up(row):
     """Use unadjusted daily close and the exchange limit price for board counts."""
@@ -1362,15 +1401,7 @@ def ladder_board_pattern(raw,consecutive):
 
 
 def ladder_data_version():
-    revision=[]
-    for path in (KPL_DB,BASIC_DB):
-        for candidate in (path,Path(str(path)+"-wal")):
-            if candidate.exists():
-                stat=candidate.stat()
-                if candidate.suffix=='-wal' and stat.st_size<=32:continue
-                revision.append((candidate.name,stat.st_size,stat.st_mtime_ns))
-    stamp=hashlib.sha256(repr(revision).encode()).hexdigest()[:16]
-    return {"ladderDataVersion":stamp,"ladderSeriesVersion":11,"cacheBackend":CACHE.backend}
+    return {"ladderDataVersion":database_revision((KPL_DB,BASIC_DB)),"ladderSeriesVersion":11,"cacheBackend":CACHE.backend}
 
 
 def limitup_ladder_data(end_date,sessions=5):
@@ -1700,7 +1731,7 @@ def ladder_topic_stock_details(date):
         catalysts.setdefault(theme,text)
         if code:item(code)['catalysts'].setdefault(theme,text)
     available=True
-    review=CACHE.get(f'review:v29:{date}')
+    review=CACHE.get(review_cache_key(date))
     if review is not None:
         for topic in review.get('topics',[]):
             add_catalyst(topic.get('name'),topic.get('summary'))
@@ -1781,12 +1812,76 @@ def ladder_date_stock_details(date, include_details=True):
     return {**details,'brokenStocks':broken,'promotionFailures':promotion_failures}
 
 
+def review_cache_key(date):
+    revision=database_revision((KPL_DB,BASIC_DB,DBROOT/"offline"/"db_cn_index.db"))
+    return f"review:v30:{date}:{revision}"
+
+
+def review_data(date):
+    key=review_cache_key(date)
+    complete_key="complete:v1:"+key
+    def load():
+        report=CACHE.get(key)
+        if report is None:
+            pool=kpl_pool(date)
+            try:
+                report=neo4j_review(date)
+            except LookupError:
+                report={"date":date,"title":f"{date[:4]}年{int(date[4:6])}月{int(date[6:])}日涨停复盘",
+                        "conclusion":"暂无数据","topics":[],"totalStocks":0,"analysisSource":"unavailable"}
+            report["pool"]=pool
+            report["topics"],fallback_topics,unattributed=market_topics(date,report,pool)
+            report["totalStocks"]=len({str(stock.get("ts_code") or "").split(".")[0][-6:] for stock in pool.get("stocks",[])})
+            report["analysisStatus"]="待补充" if unattributed else "已完成"
+            report["unattributedStocks"]=unattributed
+            report["indices"]=indices(date)
+            CACHE.set(key,report,300)
+        if any("amount" not in item for item in report.get("indices",[])):
+            report["indices"]=indices(date)
+            CACHE.set(key,report,300)
+        report["marketStats"]=market_stats(date,report.get("topics",[]),report.get("pool",{}))
+        if report["marketStats"].get("sealed") is not None:
+            report["pool"]["all_break_stocks"]=report["marketStats"].pop("allBreakStocks")
+            report["pool"]["break_stocks"]=report["marketStats"].pop("firstBoardBreakStocks")
+        span_cache={}
+        def add_limitup_span(stock):
+            code=str(stock.get("ts_code") or stock.get("code") or "")
+            if not re.fullmatch(r"\d{6}\.(SH|SZ|BJ)",code): return
+            if code not in span_cache: span_cache[code]=previous_limitup_trading_info(code,date)
+            info=span_cache[code]
+            stock["previousLimitUpTradingDays"]=info["days"]
+            stock["previousLimitUpHistoricalFirst"]=info["historicalFirst"]
+        for stock in report.get("pool",{}).get("stocks",[]): add_limitup_span(stock)
+        for stock in report.get("pool",{}).get("break_stocks",[]): add_limitup_span(stock)
+        for stock in report.get("marketStats",{}).get("nonPromotedStocks",[]): add_limitup_span(stock)
+        for topic in report.get("topics",[]):
+            for stock in topic.get("stocks",[]): add_limitup_span(stock)
+        report["stockConcepts"]=stock_concepts(date)
+        return report
+    return cached_series(complete_key,load,60)
+
+
 class Handler(SimpleHTTPRequestHandler):
     def __init__(self,*a,**kw): super().__init__(*a,directory=str(WEBROOT),**kw)
     def log_message(self,fmt,*args): print("[http]",fmt%args)
     def send_json(self,obj,status=200):
         body=json.dumps(obj,ensure_ascii=False,separators=(",",":"),allow_nan=False).encode()
-        self.send_response(status); self.send_header("Content-Type","application/json; charset=utf-8"); self.send_header("Access-Control-Allow-Origin","*"); self.send_header("Content-Length",str(len(body))); self.end_headers(); self.wfile.write(body)
+        encodings={}
+        for item in self.headers.get("Accept-Encoding","").lower().split(','):
+            parts=item.strip().split(';');quality=1.0
+            for parameter in parts[1:]:
+                if parameter.strip().startswith('q='):
+                    try: quality=float(parameter.strip()[2:])
+                    except ValueError: quality=0
+            encodings[parts[0].strip()]=quality
+        compressed=len(body)>=4096 and encodings.get('gzip',encodings.get('*',0))>0
+        if compressed: body=gzip.compress(body,compresslevel=1,mtime=0)
+        self.send_response(status)
+        self.send_header("Content-Type","application/json; charset=utf-8")
+        self.send_header("Access-Control-Allow-Origin","*")
+        self.send_header("Vary","Accept-Encoding")
+        if compressed: self.send_header("Content-Encoding","gzip")
+        self.send_header("Content-Length",str(len(body)));self.end_headers();self.wfile.write(body)
     def do_GET(self):
         u=urlparse(self.path); q=parse_qs(u.query)
         try:
@@ -1869,9 +1964,8 @@ class Handler(SimpleHTTPRequestHandler):
                 if len(dates)>30:raise ValueError("单次破板窗口最多30个交易日")
                 rows=[]
                 for day in dates:
-                    key=f"ladder-breaks:v1:{day}:{meta['ladderDataVersion']}";items=CACHE.get(key)
-                    if items is None:
-                        items=ladder_date_stock_details(day,include_details=False)['brokenStocks'];CACHE.set(key,items,300)
+                    key=f"ladder-breaks:v1:{day}:{meta['ladderDataVersion']}"
+                    items=cached_series(key,lambda:ladder_date_stock_details(day,include_details=False)['brokenStocks'],300)
                     rows.extend(items)
                 return self.send_json({'dates':dates,'brokenStocks':rows,**meta})
             if u.path=="/api/ladder-date-details":
@@ -1899,47 +1993,11 @@ class Handler(SimpleHTTPRequestHandler):
                 ttl=300 if date>=today else 24*3600
                 payload=CACHE.get(key);hit=payload is not None
                 if payload is None:
-                    payload={**limitup_ladder_data(date,sessions),**meta,"cacheTtlSeconds":ttl}
-                    CACHE.set(key,payload,ttl)
+                    payload=cached_series(key,lambda:{**limitup_ladder_data(date,sessions),**meta,"cacheTtlSeconds":ttl},ttl)
                 return self.send_json({**payload,"cacheBackend":CACHE.backend,"cacheHit":hit})
             if u.path=="/api/review":
-                date=safe_date(q.get("date",[""])[0]); key=f"review:v29:{date}"; report=CACHE.get(key)
-                if report is None:
-                    pool=kpl_pool(date)
-                    try:
-                        report=neo4j_review(date)
-                    except LookupError:
-                        report={"date":date,"title":f"{date[:4]}年{int(date[4:6])}月{int(date[6:])}日涨停复盘",
-                                "conclusion":"暂无数据","topics":[],"totalStocks":0,"analysisSource":"unavailable"}
-                    report["pool"]=pool
-                    report["topics"],fallback_topics,unattributed=market_topics(date,report,pool)
-                    report["totalStocks"]=len({str(stock.get("ts_code") or "").split(".")[0][-6:] for stock in pool.get("stocks",[])})
-                    report["analysisStatus"]="待补充" if unattributed else "已完成"
-                    report["unattributedStocks"]=unattributed
-                    report["indices"]=indices(date)
-                    CACHE.set(key,report,1800)
-                if any("amount" not in item for item in report.get("indices",[])):
-                    report["indices"]=indices(date)
-                    CACHE.set(key,report,1800)
-                report["marketStats"]=market_stats(date,report.get("topics",[]),report.get("pool",{}))
-                if report["marketStats"].get("sealed") is not None:
-                    report["pool"]["all_break_stocks"]=report["marketStats"].pop("allBreakStocks")
-                    report["pool"]["break_stocks"]=report["marketStats"].pop("firstBoardBreakStocks")
-                span_cache={}
-                def add_limitup_span(stock):
-                    code=str(stock.get("ts_code") or stock.get("code") or "")
-                    if not re.fullmatch(r"\d{6}\.(SH|SZ|BJ)",code): return
-                    if code not in span_cache: span_cache[code]=previous_limitup_trading_info(code,date)
-                    info=span_cache[code]
-                    stock["previousLimitUpTradingDays"]=info["days"]
-                    stock["previousLimitUpHistoricalFirst"]=info["historicalFirst"]
-                for stock in report.get("pool",{}).get("stocks",[]): add_limitup_span(stock)
-                for stock in report.get("pool",{}).get("break_stocks",[]): add_limitup_span(stock)
-                for stock in report.get("marketStats",{}).get("nonPromotedStocks",[]): add_limitup_span(stock)
-                for topic in report.get("topics",[]):
-                    for stock in topic.get("stocks",[]): add_limitup_span(stock)
-                report["stockConcepts"]=stock_concepts(date)
-                return self.send_json(report)
+                date=safe_date(q.get("date",[""])[0])
+                return self.send_json(review_data(date))
             if u.path=="/api/topic_daily_kline":
                 date=safe_date(q.get("date",[""])[0])
                 codes=list(dict.fromkeys(code for code in q.get("codes",[""])[0].split(",") if re.fullmatch(r"\d{6}\.(SH|SZ|BJ)",code)))
