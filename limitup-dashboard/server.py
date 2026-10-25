@@ -1738,6 +1738,12 @@ def ladder_topic_stock_details(date):
                     number=float(value)
                     if math.isfinite(number):item(code)['pct']=number
                 except (TypeError,ValueError):pass
+    # One date-level read also covers failed promotions absent from today's KPL pool.
+    turnover_rates={}
+    with sqlite3.connect(f'file:{BASIC_DB}?mode=ro',uri=True,timeout=3) as connection:
+        for code,value in connection.execute('SELECT ts_code,turnover_rate_f FROM tbl_cn_daily_basic WHERE trade_date=?',(date,)):
+            parsed=amount(value)
+            if parsed is not None:turnover_rates[code]=parsed
     def add_reason(code,theme,bridge,reason):
         theme=str(theme or '').strip();code=str(code or '').strip().upper()
         text=next((str(value).strip() for value in (bridge,reason) if str(value or '').strip() not in ('','—','-','暂无数据','没有数据','暂无分析')),'')
@@ -1779,12 +1785,12 @@ def ladder_topic_stock_details(date):
         except Exception as exc:
             available=False
             print('ladder topic attribution unavailable',date,type(exc).__name__,flush=True)
-    return {'date':date,'stocks':stocks,'catalysts':catalysts,'reasonSource':'neo4j','reasonAvailable':available,'ttlSeconds':300 if available else 30}
+    return {'date':date,'stocks':stocks,'catalysts':catalysts,'freeFloatTurnoverByCode':turnover_rates,'reasonSource':'neo4j','reasonAvailable':available,'ttlSeconds':300 if available else 30}
 
 
 def ladder_date_stock_details(date, include_details=True):
     """Lazy date-hover supplement; verify broken first boards against raw daily prices."""
-    meta=ladder_data_version();key=f"ladder-topic-details:v4:{date}:{meta['ladderDataVersion']}"
+    meta=ladder_data_version();key=f"ladder-topic-details:v5:{date}:{meta['ladderDataVersion']}"
     details=CACHE.get(key) if include_details else {'stocks':{},'ttlSeconds':300,**meta}
     if details is None:
         details={**ladder_topic_stock_details(date),**meta};CACHE.set(key,details,details['ttlSeconds'])
@@ -2013,7 +2019,7 @@ class Handler(SimpleHTTPRequestHandler):
                 return self.send_json({'dates':dates,'brokenStocks':rows,**meta})
             if u.path=="/api/ladder-date-details":
                 date=safe_date(q.get("date",[""])[0]);meta=ladder_data_version()
-                key=f"ladder-date-details:v2:{date}:{meta['ladderDataVersion']}:{database_revision((DBROOT / 'offline' / 'db_cn_index.db',))}"
+                key=f"ladder-date-details:v3:{date}:{meta['ladderDataVersion']}:{database_revision((DBROOT / 'offline' / 'db_cn_index.db',))}"
                 payload=CACHE.get(key)
                 if payload is None:
                     payload=ladder_date_stock_details(date)
@@ -2021,7 +2027,7 @@ class Handler(SimpleHTTPRequestHandler):
                 return self.send_json(payload)
             if u.path=="/api/ladder-topic-details":
                 date=safe_date(q.get("date",[""])[0]);meta=ladder_data_version()
-                key=f"ladder-topic-details:v4:{date}:{meta['ladderDataVersion']}"
+                key=f"ladder-topic-details:v5:{date}:{meta['ladderDataVersion']}"
                 payload=CACHE.get(key)
                 if payload is None:
                     payload={**ladder_topic_stock_details(date),**meta}

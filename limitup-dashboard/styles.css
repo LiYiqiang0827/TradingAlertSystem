@@ -742,3 +742,7 @@ body:has(.ladder-vertical) .topbar{display:none}.content:has(.ladder-vertical){p
 .index-overview-identity>.index-name-link{font-size:inherit}.vl-date-index>.index-name-link{font-size:9px}
 .vl-index-preview-badge{display:inline-grid;place-items:center;width:22px;height:22px;flex:0 0 22px;border:1px solid var(--line);border-radius:50%;background:var(--soft);font-size:11px!important;color:var(--green)!important}
 .vl-index-preview .vl-stock-preview-head>.index-name-link{font-size:14px}.vl-index-preview{z-index:1460}
+
+/* Daily free-float turnover is already a percentage in daily_basic. */
+.vl-hover-turnover-col{width:68px}.vl-hover-turnover{white-space:nowrap}
+@media(max-width:600px){.vl-hover-turnover-col{width:62px}}
