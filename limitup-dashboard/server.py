@@ -1370,7 +1370,7 @@ def ladder_data_version():
                 if candidate.suffix=='-wal' and stat.st_size<=32:continue
                 revision.append((candidate.name,stat.st_size,stat.st_mtime_ns))
     stamp=hashlib.sha256(repr(revision).encode()).hexdigest()[:16]
-    return {"ladderDataVersion":stamp,"ladderSeriesVersion":8,"cacheBackend":CACHE.backend}
+    return {"ladderDataVersion":stamp,"ladderSeriesVersion":11,"cacheBackend":CACHE.backend}
 
 
 def limitup_ladder_data(end_date,sessions=5):
@@ -1510,6 +1510,58 @@ def limitup_ladder_data(end_date,sessions=5):
                     edge={'source':previous['id'],'target':node['id'],'status':'promoted','kind':kind,'value':1,'gapDates':gap,'sourceBoard':previous['board'],'targetBoard':node['board']}
                     promotion.append(edge);outgoing[previous['id']]=edge
             previous=node
+    broken_meta={}
+    with sqlite3.connect(f'file:{KPL_DB}?mode=ro',uri=True,timeout=4) as c:
+        for day,code,name,time,theme,description in c.execute(f"SELECT trade_date,ts_code,name,lu_time,theme,lu_desc FROM tbl_cn_kpl_list WHERE trade_date BETWEEN ? AND ? AND ts_code IN ({code_marks}) AND tag='炸板'",[history_start,end_date,*codes]):
+            broken_meta[(day,code)]={'name':name,'time':clock(time),'theme':re.split(r'[、,，;；]',str(description or theme or ''))[0].strip() or '暂无题材'}
+    raw_by_code={code:[] for code in codes}
+    for raw in recent_history:raw_by_code[raw['ts_code']].append(raw)
+    broken_events={}
+    for code,raws in raw_by_code.items():
+        previous_raw=None;items=[]
+        for raw in raws:
+            if (raw['trade_date'],code) in suspended:continue
+            if previous_raw is not None and not is_closed_limit_up(previous_raw) and raw['up_limit'] is not None and raw['daily_high'] is not None and float(raw['up_limit'])>0 and float(raw['daily_high'])>=float(raw['up_limit'])-.005 and not is_closed_limit_up(raw):
+                day=raw['trade_date'];extra=broken_meta.get((day,code),{})
+                items.append({'id':day+':'+code+':broken','date':day,'code':code,'name':extra.get('name') or names.get(code,code),'theme':extra.get('theme') or '暂无题材','board':0,'status':'broken','pct':raw['pct_chg'],'time':extra.get('time') or ''})
+            previous_raw=raw
+        broken_events[code]=items
+    # A fresh first board may restart an earlier terminated run. These links are
+    # separate from promotions and must never merge theme-attribution chains.
+    relimit_links=[];relimit_context={};relimit_broken={}
+    for code,by_date in events.items():
+        previous=None
+        for node in sorted(by_date.values(),key=lambda item:item['date']):
+            if previous is not None and node['date'] in dates and node['board']==1:
+                left=day_index.get(previous['date']);right=day_index.get(node['date'])
+                if left is not None and right is not None:
+                    intervening=calendar_days[left+1:right]
+                    failure=next((day for day in intervening if (day,code) not in suspended),None)
+                    raw=daily.get((failure,code)) if failure else None
+                    gap=right-day_index[failure] if failure else 0
+                    # Missing daily rows do not establish a failed board. An all-halt
+                    # interval belongs to the existing suspension-promotion pathway.
+                    if raw is not None and not is_closed_limit_up(raw) and 1<=gap<=10:
+                        relimit_links.append({'source':previous['id'],'target':node['id'],'status':'relimit','kind':'relimit','code':code,'name':node['name'],'sourceDate':previous['date'],'failureDate':failure,'targetDate':node['date'],'sessions':gap,'sourceBoard':previous['board'],'afterSuspension':failure!=calendar_days[left+1]})
+                        relimit_context[previous['id']]=previous
+            previous=node
+    # Compare genuine first-board failures with ended sealed runs, selecting
+    # only the closest dated termination for each fresh first board.
+    nearest={edge['target']:edge for edge in relimit_links}
+    for code,by_date in events.items():
+        failures=broken_events.get(code,[]);failure_days=[stock['date'] for stock in failures]
+        for node in by_date.values():
+            if node['date'] not in dates or node['board']!=1:continue
+            index=bisect.bisect_left(failure_days,node['date'])-1
+            if index<0:continue
+            source=failures[index];gap=day_index[node['date']]-day_index[source['date']]
+            # A later sealed run supersedes an older failed first-board attempt.
+            sealed_between=any(source['date']<day<node['date'] for day in by_date)
+            prior=nearest.get(node['id'])
+            if 1<=gap<=10 and not sealed_between and (prior is None or source['date']>prior['failureDate']):
+                nearest[node['id']]={'source':source['id'],'target':node['id'],'status':'relimit','kind':'relimit','code':code,'name':node['name'],'sourceDate':source['date'],'failureDate':source['date'],'targetDate':node['date'],'sessions':gap,'sourceBoard':0,'afterSuspension':False}
+                relimit_broken[source['id']]=source
+    relimit_links=list(nearest.values())
     visible=[];context=[]
     for day,pool in pools.items():
         for code in pool:
@@ -1557,7 +1609,7 @@ def limitup_ladder_data(end_date,sessions=5):
     for node in visible:
         if node['board']==1:first_counts[node['date']][node['theme']]=first_counts[node['date']].get(node['theme'],0)+1
     themes=sorted({node['theme'] for node in visible})
-    return {'sealedStocks':visible,'contextStocks':context,'suspendedStocks':[],'suspensionCarry':suspension_carry,'unpromotedStocks':unpromoted,'date':end_date,'dates':dates,'previousDates':previous_dates,'nodes':nodes,'links':links,'themes':[{'name':name} for name in themes],'firstCounts':first_counts,'source':'kpl_performance_board_pattern+verified_actual_limitup_paths'}
+    return {'relimitLinks':relimit_links,'relimitContextStocks':list(relimit_context.values()),'relimitBrokenStocks':list(relimit_broken.values()),'sealedStocks':visible,'contextStocks':context,'suspendedStocks':[],'suspensionCarry':suspension_carry,'unpromotedStocks':unpromoted,'date':end_date,'dates':dates,'previousDates':previous_dates,'nodes':nodes,'links':links,'themes':[{'name':name} for name in themes],'firstCounts':first_counts,'source':'kpl_performance_board_pattern+verified_actual_limitup_paths'}
 
 
 def ladder_stock_facts(date,code):
@@ -1842,7 +1894,7 @@ class Handler(SimpleHTTPRequestHandler):
                 date=safe_date(q.get("date",[""])[0]);sessions=int(q.get("sessions",["5"])[0])
                 if not 1<=sessions<=30:raise ValueError("天梯窗口支持1至30个交易日")
                 meta=ladder_data_version()
-                key=f"limitup-ladder:v9:{date}:{sessions}:{meta['ladderDataVersion']}"
+                key=f"limitup-ladder:v12:{date}:{sessions}:{meta['ladderDataVersion']}"
                 today=datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=8))).strftime("%Y%m%d")
                 ttl=300 if date>=today else 24*3600
                 payload=CACHE.get(key);hit=payload is not None
