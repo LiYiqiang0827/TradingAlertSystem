@@ -715,3 +715,23 @@ body:has(.ladder-vertical) .topbar{display:none}.content:has(.ladder-vertical){p
 .vl-hover-sort{display:inline-flex;align-items:center;gap:2px;border:0;padding:0;background:transparent;color:inherit;font:inherit;white-space:nowrap;cursor:pointer}
 .vl-hover-sort:hover,.vl-hover-sort:focus-visible,.vl-topic-hover th[aria-sort="ascending"] .vl-hover-sort,.vl-topic-hover th[aria-sort="descending"] .vl-hover-sort{color:var(--ink)}
 .vl-hover-sort:focus-visible{outline:1px dotted currentColor;outline-offset:2px}.vl-hover-sort span{font-size:8px}
+
+/* Search stays in the ladder toolbar and shares existing theme/stock focus actions. */
+.vl-ladder-search{position:relative;z-index:12;flex:none}
+.vl-search-toggle{width:27px;height:27px;border:1px solid var(--line);border-radius:5px;padding:0;display:grid;place-items:center;background:var(--paper);color:var(--muted);cursor:pointer}
+.vl-search-toggle svg{fill:none;stroke:currentColor;stroke-width:1.5;stroke-linecap:round}.vl-search-toggle:hover,.vl-search-toggle[aria-expanded="true"]{background:#edf4ee;color:var(--ink);border-color:#a9bfae}
+.vl-search-panel{position:absolute;top:calc(100% + 6px);left:0;width:300px;max-width:calc(100vw - 160px);padding:7px;border:1px solid var(--line);border-radius:8px;background:var(--paper);box-shadow:0 6px 22px #15251d24}.vl-search-panel[hidden]{display:none}
+.vl-search-panel input{width:100%;min-width:0;height:30px;border:1px solid var(--line);border-radius:5px;padding:4px 8px;background:var(--paper);color:var(--ink);font:11px var(--sans);outline:none}.vl-search-panel input:focus{border-color:#8fae99}
+.vl-search-results{margin-top:5px;max-height:min(360px,65vh);overflow:auto;scrollbar-width:thin}.vl-search-results button{display:flex;align-items:center;gap:7px;width:100%;border:0;border-radius:5px;padding:6px;text-align:left;background:transparent;color:var(--ink);cursor:pointer}.vl-search-results button:hover,.vl-search-results button[aria-selected="true"]{background:#edf4ee}
+.vl-search-kind{flex:none;display:grid;place-items:center;width:20px;height:20px;border:1px solid #b8cbbd;border-radius:50%;color:var(--green);font:10px var(--sans)}.vl-search-copy{display:flex;flex-direction:column;gap:2px;min-width:0}.vl-search-copy strong{font:11px var(--sans)}.vl-search-copy small{font:9px var(--sans);color:var(--muted);overflow:hidden;white-space:nowrap;text-overflow:ellipsis}.vl-search-empty{padding:12px 6px;color:var(--muted);font:10px var(--sans)}
+.vl-search-toggle:focus-visible,.vl-search-results button:focus-visible{outline:1px dotted var(--green);outline-offset:2px}
+
+/* Daily overview links and compact date-hover market context. */
+.index-heading-link{border:0;padding:0;background:transparent;color:inherit;font:inherit;cursor:pointer}.index-heading-link:hover{text-decoration:underline;text-underline-offset:3px}
+.index-heading-link:focus-visible{outline:1px solid currentColor;outline-offset:3px}
+.vl-date-market{padding:6px 8px 0;border-bottom:1px solid var(--line)}
+.vl-date-indices{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:4px 8px}
+.vl-date-index{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:baseline;gap:1px 5px;padding:3px 5px;border:1px solid var(--line);border-radius:4px;font-size:9px;font-variant-numeric:tabular-nums}
+.vl-date-index strong{font-size:9px;font-weight:600;white-space:nowrap}.vl-date-index b{font-size:10px;font-weight:500}.vl-date-index small{font-size:9px;color:var(--muted);text-align:right}
+.vl-date-market-summary{display:flex;flex-wrap:wrap;gap:2px 9px;margin:5px 0;font-size:9px;line-height:1.4;color:var(--ink)}.vl-date-market-summary span{max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+@media(max-width:600px){.vl-date-indices{grid-template-columns:repeat(2,minmax(0,1fr))}}

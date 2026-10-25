@@ -1830,7 +1830,29 @@ def ladder_date_stock_details(date, include_details=True):
         code=row['code'];extra=market.get(code,{})
         target=promotion_failures if row['isPromotionFailure'] else broken
         target.append({'id':date+':'+code+':broken','date':date,'status':'broken','code':code,'name':extra.get('name') or names.get(code) or code[:6],'theme':extra.get('theme') or '暂无题材','originalTheme':extra.get('theme') or '暂无题材','board':0,'pct':row['pct'],'time':extra.get('time') or ''})
+    if include_details:
+        details.update(indices=indices(date),marketSummary=ladder_market_summary(date))
     return {**details,'brokenStocks':broken,'promotionFailures':promotion_failures}
+
+
+def ladder_market_summary(date):
+    """Same market-wide cohorts as market_stats; read only today and yesterday."""
+    with sqlite3.connect(f'file:{BASIC_DB}?mode=ro',uri=True,timeout=3) as connection:
+        connection.row_factory=sqlite3.Row
+        previous=connection.execute('SELECT MAX(trade_date) FROM tbl_cn_day WHERE trade_date<?',(date,)).fetchone()[0]
+        rows=connection.execute("""SELECT d.trade_date,d.ts_code,d.close,d.high,l.up_limit
+            FROM tbl_cn_day d JOIN tbl_cn_stk_limit l
+            ON l.trade_date=d.trade_date AND l.ts_code=d.ts_code
+            WHERE d.trade_date IN (?,?)""",(date,previous)).fetchall()
+    today=[row for row in rows if row['trade_date']==date]
+    sealed={row['ts_code'] for row in today if is_closed_limit_up(row)}
+    touched={row['ts_code'] for row in today if row['high'] is not None and row['up_limit'] is not None and float(row['up_limit'])>0 and abs(float(row['high'])-float(row['up_limit']))<0.005}
+    prior={row['ts_code'] for row in rows if row['trade_date']==previous and is_closed_limit_up(row)}
+    promoted=len(prior & sealed);broken=len(touched-sealed)
+    return {'previousDate':previous,'promotionNumerator':promoted,'promotionDenominator':len(prior),
+            'promotionRate':promoted/len(prior) if prior else None,'sealed':len(sealed) if today else None,
+            'touched':len(touched) if today else None,'broken':broken if today else None,
+            'breakRate':broken/len(touched) if touched else None}
 
 
 def review_cache_key(date):
@@ -1991,7 +2013,7 @@ class Handler(SimpleHTTPRequestHandler):
                 return self.send_json({'dates':dates,'brokenStocks':rows,**meta})
             if u.path=="/api/ladder-date-details":
                 date=safe_date(q.get("date",[""])[0]);meta=ladder_data_version()
-                key=f"ladder-date-details:v1:{date}:{meta['ladderDataVersion']}"
+                key=f"ladder-date-details:v2:{date}:{meta['ladderDataVersion']}:{database_revision((DBROOT / 'offline' / 'db_cn_index.db',))}"
                 payload=CACHE.get(key)
                 if payload is None:
                     payload=ladder_date_stock_details(date)
