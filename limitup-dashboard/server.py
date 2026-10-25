@@ -1405,14 +1405,14 @@ def ladder_board_pattern(raw,consecutive):
 
 
 def ladder_data_version():
-    return {"ladderDataVersion":database_revision((KPL_DB,BASIC_DB)),"ladderSeriesVersion":11,"cacheBackend":CACHE.backend}
+    return {"ladderDataVersion":database_revision((KPL_DB,BASIC_DB)),"ladderSeriesVersion":12,"cacheBackend":CACHE.backend}
 
 
 def limitup_ladder_data(end_date,sessions=5):
     '''Actual sealed nodes only, with dated promotion/recovery paths through the cutoff.'''
     dates=[day for day in market_data_dates() if day<=end_date][-sessions:]
     if not dates:return {'date':end_date,'dates':[],'nodes':[],'links':[],'themes':[],'sealedStocks':[],'contextStocks':[]}
-    with sqlite3.connect(f'file:{BASIC_DB}?mode=ro',uri=True,timeout=4) as c:
+    with closing(sqlite3.connect(f'file:{BASIC_DB}?mode=ro',uri=True,timeout=4)) as c:
         calendar_days=[row[0] for row in c.execute("SELECT cal_date FROM tbl_cn_tradecal WHERE exchange='SSE' AND is_open=1 AND cal_date<=? ORDER BY cal_date",(end_date,))]
     calendar_days=sorted(set(calendar_days)|set(dates))
     day_index={day:i for i,day in enumerate(calendar_days)}
@@ -1420,7 +1420,7 @@ def limitup_ladder_data(end_date,sessions=5):
     pool_days=sorted(set(dates)|{calendar_days[day_index[day]-1] for day in dates if day_index[day]>0})
     marks=','.join('?' for _ in pool_days)
     pools={day:{} for day in pool_days}
-    with sqlite3.connect(f'file:{KPL_DB}?mode=ro',uri=True,timeout=4) as c:
+    with closing(sqlite3.connect(f'file:{KPL_DB}?mode=ro',uri=True,timeout=4)) as c:
         c.row_factory=sqlite3.Row
         for row in c.execute(f'SELECT trade_date,ts_code,name,theme,lu_time,close_price,board_period FROM tbl_cn_kpl_limit_performance WHERE trade_date IN ({marks})',pool_days):
             item=dict(row);item['theme']=str(item['theme'] or '').strip() or '暂无题材';pools[item['trade_date']][item['ts_code']]=item
@@ -1434,7 +1434,7 @@ def limitup_ladder_data(end_date,sessions=5):
     max_span=max([90]+[int(match.group(1)) for pool in pools.values() for item in pool.values() if (match:=re.fullmatch(r'(\d+)天(\d+)板',str(item.get('board_period') or '').strip()))])
     history_start=calendar_days[max(0,first_index-max_span-1)]
     code_marks=','.join('?' for _ in codes)
-    with sqlite3.connect(f'file:{BASIC_DB}?mode=ro',uri=True,timeout=4) as c:
+    with closing(sqlite3.connect(f'file:{BASIC_DB}?mode=ro',uri=True,timeout=4)) as c:
         c.row_factory=sqlite3.Row
         history=list(c.execute(f'''SELECT d.trade_date,d.ts_code,d.close,d.pct_chg,l.up_limit,d.open AS daily_open,d.high AS daily_high,d.low AS daily_low,d.close AS daily_close,d.pre_close,l.down_limit FROM tbl_cn_day d LEFT JOIN tbl_cn_stk_limit l ON l.ts_code=d.ts_code AND l.trade_date=d.trade_date WHERE d.trade_date BETWEEN ? AND ? AND d.ts_code IN ({code_marks})''',[history_start,end_date,*codes]))
         # Count the complete recent history independently of any distant anchor.
@@ -1483,7 +1483,7 @@ def limitup_ladder_data(end_date,sessions=5):
         # Confirm every intervening trading session is halted before marking a pause bridge.
         limits={(row[0],row[1]):row[2] for row in c.execute(f'SELECT trade_date,ts_code,up_limit FROM tbl_cn_stk_limit WHERE trade_date IN ({marks})',pool_days)}
     meta={};seal_facts={}
-    with sqlite3.connect(f'file:{KPL_DB}?mode=ro',uri=True,timeout=4) as c:
+    with closing(sqlite3.connect(f'file:{KPL_DB}?mode=ro',uri=True,timeout=4)) as c:
         c.row_factory=sqlite3.Row
         for row in c.execute(f'''SELECT trade_date,ts_code,name,theme,lu_time,close_price,board_period FROM tbl_cn_kpl_limit_performance WHERE trade_date BETWEEN ? AND ? AND ts_code IN ({code_marks})''',[earliest,end_date,*codes]):
             item=dict(row);item['theme']=str(item['theme'] or '').strip() or '暂无题材';meta[(item['trade_date'],item['ts_code'])]=item
@@ -1514,9 +1514,14 @@ def limitup_ladder_data(end_date,sessions=5):
         except (KeyError,TypeError,ValueError):pass
         traits=classify_limitup_traits(facts)
         return {'id':day+':'+code,'date':day,'code':code,'name':item.get('name') or names.get(code,code),'theme':str(item.get('theme') or '').strip() or '暂无题材','board':board,'consecutiveBoard':max(1,int(consecutive or 1)),'patternDays':span,'boardPeriod':label,'board_shape':facts.get('board_shape'),'board_strength':traits['board_strength'],'last_time':facts.get('last_time'),'open_times':facts.get('open_times'),'status':'sealed','time':clock(item.get('lu_time')),'representative':False,'firstCount':0,'members':[]}
+    # A daily-only sealed row is not a ladder event when all three market
+    # sources omit it. Such invisible rows used to consume the predecessor of
+    # a reported multi-session pattern and leave its visible nodes disconnected.
+    reported_events=set(meta)|set(seal_facts)|{(day,code) for day,pool in pools.items() for code in pool}
     for row in history:
-        if is_closed_limit_up(row):
-            day,code=row['trade_date'],row['ts_code'];events[code][day]=event(day,code,meta.get((day,code),{}),counts.get(day,{}).get(code,1))
+        day,code=row['trade_date'],row['ts_code']
+        if is_closed_limit_up(row) and ((day,code) in reported_events or day<history_start):
+            events[code][day]=event(day,code,meta.get((day,code),{}),counts.get(day,{}).get(code,1))
     for day,pool in pools.items():
         for code,item in list(pool.items()):
             raw=daily.get((day,code));limit=limits.get((day,code));price=item.get('close_price')
@@ -1546,7 +1551,7 @@ def limitup_ladder_data(end_date,sessions=5):
                     promotion.append(edge);outgoing[previous['id']]=edge
             previous=node
     broken_meta={}
-    with sqlite3.connect(f'file:{KPL_DB}?mode=ro',uri=True,timeout=4) as c:
+    with closing(sqlite3.connect(f'file:{KPL_DB}?mode=ro',uri=True,timeout=4)) as c:
         for day,code,name,time,theme,description in c.execute(f"SELECT trade_date,ts_code,name,lu_time,theme,lu_desc FROM tbl_cn_kpl_list WHERE trade_date BETWEEN ? AND ? AND ts_code IN ({code_marks}) AND tag='炸板'",[history_start,end_date,*codes]):
             broken_meta[(day,code)]={'name':name,'time':clock(time),'theme':re.split(r'[、,，;；]',str(description or theme or ''))[0].strip() or '暂无题材'}
     raw_by_code={code:[] for code in codes}
@@ -1604,6 +1609,13 @@ def limitup_ladder_data(end_date,sessions=5):
             (visible if day in dates else context).append(node)
     # Include context-origin paths so later prepend operations can reconnect their actual sources.
     links=[edge for edge in promotion if edge['target'].split(':',1)[0] in pool_days]
+    # A break/pause source can precede the prior market day. Carry its exact
+    # node with the edge so each payload is complete at a preload boundary.
+    included={node['id'] for node in visible+context}
+    for edge in links:
+        if edge['source'] not in included:
+            source_day,code=edge['source'].split(':',1)
+            context.append(events[code][source_day]);included.add(edge['source'])
     nodes=list(visible);now=datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=8)))
     for node in visible+context:
         if node['id'] in outgoing or node['board']<=1:continue
@@ -1992,7 +2004,7 @@ class Handler(SimpleHTTPRequestHandler):
                 date=safe_date(q.get("date",[""])[0]);sessions=int(q.get("sessions",["5"])[0])
                 if not 1<=sessions<=30:raise ValueError("天梯窗口支持1至30个交易日")
                 meta=ladder_data_version()
-                key=f"limitup-ladder:v12:{date}:{sessions}:{meta['ladderDataVersion']}"
+                key=f"limitup-ladder:v13:{date}:{sessions}:{meta['ladderDataVersion']}"
                 today=datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=8))).strftime("%Y%m%d")
                 ttl=300 if date>=today else 24*3600
                 payload=CACHE.get(key);hit=payload is not None

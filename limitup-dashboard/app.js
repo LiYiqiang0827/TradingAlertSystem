@@ -735,7 +735,7 @@
   async function openTopic(name,date=state.date,historyMode='push'){if(needsReviewDate(date)&&!await loadDate(date))return;if(!state.review.topics.some(t=>t.name===name)){toast(`该日没有「${name}」题材页面`);return;}syncBrowserRoute('topic',date,name,'',historyMode);renderTopic(name);renderNav();}
   let ladderRequestId=0,ladderResizeObserver=null,ladderView=null;
   const ladderCache=new Map(),ladderThemeColors=new Map();
-  const LADDER_PRELOAD_SESSIONS=20,LADDER_CACHE_LIMIT=24,LADDER_CACHE_SCHEMA=11;
+  const LADDER_PRELOAD_SESSIONS=20,LADDER_CACHE_LIMIT=24,LADDER_CACHE_SCHEMA=12;
   const ladderRequests=new Map();let ladderCacheDbPromise=null,ladderRevision='',ladderRevisionAt=0,ladderRevisionRequest=null;
   async function currentLadderVersion(){
     if(ladderRevision&&Date.now()-ladderRevisionAt<30000)return ladderRevision;
