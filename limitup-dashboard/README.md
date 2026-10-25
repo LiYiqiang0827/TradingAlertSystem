@@ -2,6 +2,13 @@
 
 与 `offlineAlertSystem/` 同级的本地 HTML 原型，默认只读访问 Mac mini 上 TradingDataManager / TradingDataBase 的现有数据。
 
+## 主导航（导航改版后）
+
+- 左侧保留交易状态、日期时钟、实时数据开关，以及启用实时数据后的“实时监控”入口。
+- 常驻入口依次为“涨停天梯”“每日总览”“重要指数”。重要指数直接进入指数总览，不再展开指数子列表。
+- 题材和个股导航使用涨停天梯；左侧不再提供旧的题材/板数列表、日历、搜索、排列方式切换和全局加号。各页面内的日历保留。
+- 改版前基线标签：`ladder-pre-nav-redesign-v1`，固定在 `2ec366f`；后续导航调整不移动该标签。
+
 ## 新机安装与启动
 
 依赖仓库：[TradeDataManager](https://github.com/LiYiqiang0827/TradeDataManager)，配套版本为两个仓库的 `theme-graph-chain-v1` 标签。[完整配置、结构、生成/入库与两天最小示例](https://github.com/LiYiqiang0827/TradeDataManager/blob/theme-graph-chain-v1/theme_graph/PORTABLE_SETUP.md)。核心类的确切路径为 `coreClient/neo4j_client.py`，随 `pip install -e '.[graph]'` 安装，Neo4j driver 不是网页仓库内置依赖。
