@@ -3,6 +3,8 @@
 from __future__ import annotations
 import json, os, re, sqlite3, sys, datetime, traceback, calendar, bisect, math, hashlib, threading, gzip
 from functools import lru_cache
+from collections import OrderedDict
+import time
 from contextlib import closing
 from http.server import ThreadingHTTPServer, SimpleHTTPRequestHandler
 from decimal import Decimal, InvalidOperation
@@ -426,6 +428,48 @@ def database_revision(paths):
     return hashlib.sha256(repr(revision).encode()).hexdigest()[:16]
 
 
+def stock_data_version():
+    paths=(BASIC_DB,KPL_DB,DBROOT/'offline'/'db_fifteenMinute.db',
+           DBROOT/'offline'/'oneMinute'/'catalog.duckdb',DBROOT/'offline'/'oneMinute'/'catalog.duckdb.wal',
+           DBROOT/'offline'/'fifteenMinute'/'fifteen_min.duckdb',DBROOT/'offline'/'fifteenMinute'/'fifteen_min.duckdb.wal')
+    return {'stockDataVersion':database_revision(paths),'stockFactsVersion':database_revision((BASIC_DB,KPL_DB)),
+            'chartSeriesVersion':7,'stockVersionAt':datetime.datetime.now(datetime.timezone.utc).timestamp()}
+
+
+_stock_response_lru=OrderedDict()
+_stock_response_lock=threading.RLock()
+_stock_response_bytes=0
+
+def cached_stock_response(key,loader):
+    """Read-only full chart payloads: LRU, 64 entries / 64 MiB, 30-minute deadline."""
+    global _stock_response_bytes
+    def read():
+        global _stock_response_bytes
+        now=time.monotonic()
+        with _stock_response_lock:
+            for old,record in list(_stock_response_lru.items()):
+                if record['deadline']<=now:
+                    _stock_response_bytes-=record['bytes'];del _stock_response_lru[old]
+            record=_stock_response_lru.get(key)
+            if record is not None:_stock_response_lru.move_to_end(key);return record['payload']
+    value=read()
+    if value is not None:return value,True
+    with _cache_load_locks[hash(key)%len(_cache_load_locks)]:
+        value=read()
+        if value is not None:return value,True
+        value=loader()
+        if not value.get('daily') or value.get('coverage',{}).get('fifteenError') or value.get('latest',{}).get('coverage',{}).get('fifteenError'):return value,False
+        size=len(json.dumps(value,ensure_ascii=False,separators=(',',':'),allow_nan=False).encode())*3
+        if size<=64*1024*1024:
+            with _stock_response_lock:
+                prior=_stock_response_lru.pop(key,None)
+                if prior:_stock_response_bytes-=prior['bytes']
+                _stock_response_lru[key]={'payload':value,'bytes':size,'deadline':time.monotonic()+1800};_stock_response_bytes+=size
+                while len(_stock_response_lru)>64 or _stock_response_bytes>64*1024*1024:
+                    _,old=_stock_response_lru.popitem(last=False);_stock_response_bytes-=old['bytes']
+        return value,False
+
+
 _market_dates_lock=threading.RLock()
 _market_dates_snapshot=None
 
@@ -711,7 +755,7 @@ def filter_unsealed_breaks(date, stocks):
 
 def previous_limitup_trading_info(code, date):
     """Distance from the current board period's first board to the prior period's last board."""
-    cache_key=f"previous-limitup-gap:v4:{code}:{date}"
+    cache_key=f"previous-limitup-gap:v5:{code}:{date}:{database_revision((BASIC_DB,KPL_DB))}"
     cached=CACHE.get(cache_key) if CACHE is not None else None
     if cached is not None:
         return cached
@@ -1474,7 +1518,7 @@ def live_stock_chart(code,day):
     import redis
     zone=ZoneInfo('Asia/Shanghai');now=datetime.datetime.now(zone)
     if day!=now.strftime('%Y%m%d'):raise ValueError('实时接口仅支持当天，历史日期请读取离线行情')
-    revision=database_revision((BASIC_DB,))
+    version=stock_data_version();revision=version['stockDataVersion'];phase=live_market_status()['phase']
     def load():
         client=None
         for attempt in range(2):
@@ -1501,15 +1545,17 @@ def live_stock_chart(code,day):
         if not current_one:raise ValueError('当天原生1分钟行情暂不可用，未用15分钟数据替代')
         r=redis.Redis(host='127.0.0.1',port=6380,decode_responses=True,socket_timeout=2)
         quote={};keys=r.zrevrange('online:snapshot:timeline',0,0)
-        if keys:
+        if phase in ('closed','recess'):
+            observations,_,_=read_online_close('snapshot',day,r);quote=observations.get(code,{})
+        elif keys:
             raw=r.hget(keys[0],code)
             if raw:quote=json.loads(raw)
         def quote_valid(q):
             try:
-                stamp=float(q.get('snapshot_timestamp') or 0);stamp=stamp/1000 if stamp>1e12 else stamp
-                return -5<=now.timestamp()-stamp<=60
+                stamp=online_stamp(q.get('snapshot_timestamp'));local=datetime.datetime.fromtimestamp(stamp,zone)
+                return local.strftime('%Y%m%d')==day and (phase in ('closed','recess') or -5<=now.timestamp()-stamp<=60)
             except (TypeError,ValueError):return False
-        if not quote_valid(quote):
+        if phase=='trading' and not quote_valid(quote):
             try:
                 from coreClient.ths_client import fetch_snapshots
                 quote=next((item for item in fetch_snapshots([code]) if item.get('ts_code')==code),{})
@@ -1542,11 +1588,11 @@ def live_stock_chart(code,day):
         facts={'code':code,'date':day,'close':close,'pct':pct,'openPct':(opening/float(prior_close)-1)*100 if prior_close else None,'amplitude':(high-low)/float(prior_close)*100 if prior_close else None,'amount':amount,'volume':volume,'floatMarketCap':None,'totalMarketCap':None,'freeFloatTurnover':None,'limitTime':None}
         live=live_ladder_snapshot();facts['limitTime']=live.get('stocks',{}).get(code,{}).get('time')
         return {'code':code,'date':day,'isLive':True,'updatedAt':now.isoformat(),'daily':daily,'oneMin':bars,'fifteenMin':historical_fifteen+current_fifteen,'suspendedDays':old_one['suspendedDays'],'previewFacts':facts,'sources':{'oneMin':'tdx_native_1min','fifteenMin':'tdx_native_15min','daily':'live_quote+native_minute'},'liveCoverage':{'oneMinBars':len(current_one),'fifteenMinBars':len(current_fifteen)}}
-    payload=cached_series(f'live-stock-hover:v7:{code}:{day}:{revision}',load,6)
+    payload=cached_series(f'live-stock-hover:v8:{code}:{day}:{revision}',load,3 if phase=='trading' or phase=='closed' and datetime.datetime.now(zone).strftime('%H%M')<'1505' else 60 if phase=='recess' else 1800)
     # Quote/fundamentals are cheap and refresh independently of the native-bar cache.
     facts=live_stock_preview_facts(code,day,payload.get('previewFacts'))
     daily=[{**bar,'turnover_rate_f':facts.get('freeFloatTurnover'),'free_float_market_cap':facts.get('freeFloatMarketCap'),'free_float_market_cap_date':facts.get('freeFloatMarketCapDate')} if datetime.datetime.fromtimestamp(bar['timestamp']/1000,datetime.timezone.utc).strftime('%Y%m%d')==day else bar for bar in payload['daily']]
-    return {**payload,'previewFacts':facts,'daily':daily}
+    return {**payload,**version,'previewFacts':facts,'daily':daily,'livePhase':phase}
 
 
 def live_stock_preview_facts(code,day,fallback=None):
@@ -2339,7 +2385,7 @@ def review_data(date):
 class Handler(SimpleHTTPRequestHandler):
     def __init__(self,*a,**kw): super().__init__(*a,directory=str(WEBROOT),**kw)
     def log_message(self,fmt,*args): print("[http]",fmt%args)
-    def send_json(self,obj,status=200):
+    def send_json(self,obj,status=200,headers=None):
         body=json.dumps(obj,ensure_ascii=False,separators=(",",":"),allow_nan=False).encode()
         encodings={}
         for item in self.headers.get("Accept-Encoding","").lower().split(','):
@@ -2355,6 +2401,8 @@ class Handler(SimpleHTTPRequestHandler):
         self.send_header("Content-Type","application/json; charset=utf-8")
         self.send_header("Access-Control-Allow-Origin","*")
         self.send_header("Vary","Accept-Encoding")
+        self.send_header("Cache-Control","no-store")
+        for key,value in (headers or {}).items():self.send_header(key,value)
         if compressed: self.send_header("Content-Encoding","gzip")
         self.send_header("Content-Length",str(len(body)));self.end_headers();self.wfile.write(body)
     def live_events(self):
@@ -2515,7 +2563,7 @@ class Handler(SimpleHTTPRequestHandler):
                 date=safe_date(q.get("date",[""])[0])
                 codes=list(dict.fromkeys(code for code in q.get("codes",[""])[0].split(",") if re.fullmatch(r"\d{6}\.(SH|SZ|BJ)",code)))
                 if len(codes)>100: raise ValueError("单次日K缩略图查询最多支持100只股票")
-                cache_key=f"topic-daily-kline-v2:{date}:{'|'.join(codes)}"
+                cache_key=f"topic-daily-kline-v3:{date}:{'|'.join(codes)}:{stock_data_version()['stockDataVersion']}"
                 def load_topic_daily_kline():
                     if not codes: return {"date":date,"series":{}}
                     end=datetime.datetime.strptime(date,"%Y%m%d").date()
@@ -2537,7 +2585,7 @@ class Handler(SimpleHTTPRequestHandler):
                 date=safe_date(q.get("date",[""])[0])
                 codes=list(dict.fromkeys(code for code in q.get("codes",[""])[0].split(",") if re.fullmatch(r"\d{6}\.(SH|SZ|BJ)",code)))
                 if len(codes)>100: raise ValueError("单次分时查询最多支持100只股票")
-                cache_key=f"topic-minute-v4:{date}:{'|'.join(codes)}"
+                cache_key=f"topic-minute-v5:{date}:{'|'.join(codes)}:{stock_data_version()['stockDataVersion']}"
                 def load_topic_intraday():
                     if not codes: return {"date":date,"series":{}}
                     placeholders=','.join('?' for _ in codes)
@@ -2584,7 +2632,7 @@ class Handler(SimpleHTTPRequestHandler):
                     days=[{"date":day,"amount":round((sh[day]+sz[day])*1000)} for day in dates]
                     return {"date":date,"basis":"000001.SH+399106.SZ","days":days}
                 ttl=300 if date==datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=8))).strftime("%Y%m%d") else 7*24*3600
-                return self.send_json(cached_series(f"market-turnover:v3:{date}",load_market_turnover,ttl))
+                return self.send_json(cached_series(f"market-turnover:v4:{date}:{index_data_version()['indexDataVersion']}",load_market_turnover,ttl))
             if u.path=="/api/indices_overview":
                 date=safe_date(q.get("date",[""])[0])
                 codes=("000001.SH","399001.SZ","399006.SZ","000688.SH","000300.SH","000016.SH","000905.SH","000852.SH")
@@ -2623,7 +2671,7 @@ class Handler(SimpleHTTPRequestHandler):
                         series[code]=result
                     return {"date":date,"series":series}
                 ttl=300 if date==datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=8))).strftime("%Y%m%d") else 7*24*3600
-                return self.send_json(cached_series(f"indices-overview:v1:{date}",load_indices_overview,ttl))
+                return self.send_json(cached_series(f"indices-overview:v2:{date}:{index_data_version()['indexDataVersion']}",load_indices_overview,ttl))
             if u.path=="/api/index":
                 code=q.get("code",[""])[0].upper(); date=safe_date(q.get("date",[""])[0])
                 index_names={"000001.SH":"上证指数","399001.SZ":"深证成指","399006.SZ":"创业板指","000688.SH":"科创50","000300.SH":"沪深300","000016.SH":"上证50","000905.SH":"中证500","000852.SH":"中证1000"}
@@ -2688,6 +2736,8 @@ class Handler(SimpleHTTPRequestHandler):
                     return {"code":code,"name":index_names[code],"date":date,"daily":daily,"weekly":weekly,"monthly":monthly,"oneMin":one_min,"fifteenMin":fifteen,"coverage":{"oneMinBars":len(one_min),"oneMinDays":len(minute_dates),"oneMinStart":minute_dates[0] if minute_dates else None,"oneMinEnd":minute_dates[-1] if minute_dates else None,"fifteenDays":len(fifteen_dates),"fifteenStart":fifteen_dates[0] if fifteen_dates else None,"fifteenEnd":fifteen_dates[-1] if fifteen_dates else None,"oneMinError":minute_error,"fifteenError":fifteen_error},"sources":{"daily":"index_daily_database","weekly":"index_weekly_database","monthly":"index_monthly_database","minute":"tdx_native_index_1min","fifteenMin":"tdx_native_index_15min","minuteVolumeMetric":"source_turnover_yuan"}}
                 payload=cached_series(key,load_index,300 if date==datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=8))).strftime("%Y%m%d") else 7*24*3600)
                 return self.send_json({**payload,**version})
+            if u.path=="/api/stock-version":
+                return self.send_json(stock_data_version())
             if u.path=="/api/live-stock-chart":
                 code=q.get('code',[''])[0];date=safe_date(q.get('date',[''])[0])
                 if not re.fullmatch(r'\d{6}\.(SH|SZ|BJ)',code):raise ValueError('股票代码无效')
@@ -2697,69 +2747,73 @@ class Handler(SimpleHTTPRequestHandler):
                 if not re.fullmatch(r"\d{6}\.(SH|SZ|BJ)",code):raise ValueError("股票代码无效")
                 meta=ladder_data_version()
                 if date==live_market_status()['date']:
-                    return self.send_json({**live_stock_preview_facts(code,date,ladder_stock_facts(date,code)),**meta})
+                    return self.send_json({**live_stock_preview_facts(code,date,ladder_stock_facts(date,code)),**meta,**stock_data_version()})
                 key=f"ladder-stock-facts:v2:{date}:{code}:{meta['ladderDataVersion']}"
                 payload=CACHE.get(key)
                 if payload is None:
                     payload={**ladder_stock_facts(date,code),**meta};CACHE.set(key,payload,300)
-                return self.send_json(payload)
+                return self.send_json({**payload,**stock_data_version()})
             if u.path=="/api/stock":
                 code=q.get("code",[""])[0]; date=safe_date(q.get("date",[""])[0]); latest=False
                 if not re.fullmatch(r"\d{6}\.(SH|SZ|BJ)",code): raise ValueError("股票代码无效")
                 if latest:
                     date=datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=8))).strftime("%Y%m%d")
-                end=datetime.datetime.strptime(date,"%Y%m%d").date(); start_1m=(end-datetime.timedelta(days=14)).strftime("%Y%m%d"); start_15m=shift_months(end,3).strftime("%Y%m%d")
-                freshness="latest:" if latest else ""
-                ttl=300 if latest else 7*24*3600
-                latest_day=datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=8))).date()
-                latest_end=latest_day.strftime("%Y%m%d")
-                latest_basis=cached_series(f"series:v10:{code}:day-week-month:latest-basis:{latest_end}",lambda:stock_series_latest(code,latest_end),300)
-                basis_tag=f"{latest_end}:{latest_basis['adjustmentBase']}"
-                one_key=f"series:v7:{code}:minute:5d:qfq:{basis_tag}:{freshness}{date}"
-                fifteen_key=f"series:v6:{code}:fifteen-minute:3m:qfq:{basis_tag}:{freshness}{date}"
-                review_series=stock_series_for_date(latest_basis,date)
-                daily=review_series["daily"]; weekly=review_series["weekly"]; monthly=review_series["monthly"]
-                def load_one():
-                    return adjusted_one_min_payload(intraday_with_suspensions(code,start_1m,date),latest_basis)
-                one_data=cached_series(one_key,load_one,ttl)
-                def load_fifteen():
-                    native=get_fifteenMin(ts_code=code,start_date=start_15m,end_date=date)
-                    native=filter_after_close(native)
-                    native=drop_full_day_suspended_bars(native,code,start_15m,date)
-                    bars=adjusted_stock_intraday_bars(compact(native,"datetime"),latest_basis)
-                    days=sorted(native["datetime"].astype(str).str[:10].unique()) if not native.empty else []
-                    return {"bars":bars,"days":days}
-                fifteen_error=None
-                try: fifteen_data=cached_series(fifteen_key,load_fifteen,ttl)
-                except Exception as exc:
-                    fifteen_error=str(exc); print("15-minute historical data unavailable:",fifteen_error,flush=True); fifteen_data={"bars":[],"days":[]}
-                latest_end=latest_day.strftime("%Y%m%d"); latest_start_1m=(latest_day-datetime.timedelta(days=14)).strftime("%Y%m%d"); latest_start_15m=shift_months(latest_day,3).strftime("%Y%m%d")
-                latest_ttl=300
-                latest_series_data=stock_series_for_date(latest_basis,latest_end)
-                latest_daily=latest_series_data["daily"]; latest_weekly=latest_series_data["weekly"]; latest_monthly=latest_series_data["monthly"]
-                def load_latest_one():
-                    return adjusted_one_min_payload(intraday_with_suspensions(code,latest_start_1m,latest_end),latest_basis)
-                latest_one=cached_series(f"series:v7:{code}:minute:5d:qfq:latest:{basis_tag}",load_latest_one,latest_ttl)
-                def load_latest_fifteen():
-                    native=filter_after_close(get_fifteenMin(ts_code=code,start_date=latest_start_15m,end_date=latest_end))
-                    native=drop_full_day_suspended_bars(native,code,latest_start_15m,latest_end)
-                    bars=adjusted_stock_intraday_bars(compact(native,"datetime"),latest_basis); days=sorted(native["datetime"].astype(str).str[:10].unique()) if not native.empty else []
-                    return {"bars":bars,"days":days}
-                latest_fifteen_error=None
-                try: latest_fifteen=cached_series(f"series:v6:{code}:fifteen-minute:3m:qfq:latest:{basis_tag}",load_latest_fifteen,latest_ttl)
-                except Exception as exc:
-                    latest_fifteen_error=str(exc); print("15-minute latest data unavailable:",latest_fifteen_error,flush=True)
-                    latest_fifteen={"bars":fifteen_data["bars"],"days":fifteen_data["days"]}
-                latest_actual_date=latest_basis["latestDate"] or latest_end
-                latest_series={"daily":latest_daily,"weekly":latest_weekly,"monthly":latest_monthly,"oneMin":latest_one["bars"],"fifteenMin":latest_fifteen["bars"],"suspendedDays":latest_one["suspendedDays"],"latestDate":latest_actual_date,"coverage":{"oneMinSuspendedDays":len(latest_one["suspendedDays"]),"oneMinDays":len(latest_one["days"]),"oneMinBars":len(latest_one["bars"]),"oneMinStart":latest_one["days"][0] if latest_one["days"] else None,"oneMinEnd":latest_one["days"][-1] if latest_one["days"] else None,"fifteenDays":len(latest_fifteen["days"]),"fifteenBars":len(latest_fifteen["bars"]),"fifteenStart":latest_fifteen["days"][0] if latest_fifteen["days"] else None,"fifteenEnd":latest_fifteen["days"][-1] if latest_fifteen["days"] else None,"fifteenError":latest_fifteen_error}}
-                latest_date=latest_actual_date
-                result={"code":code,"date":date,"latestMode":False,"latestDate":latest_date,"seriesReferenceDate":latest_end,"cacheBackend":CACHE.backend,"daily":daily,"weekly":weekly,"monthly":monthly,"oneMin":one_data["bars"],"fifteenMin":fifteen_data["bars"],"suspendedDays":one_data["suspendedDays"],"fifteenSource":"fifteen_minute_database","oneMinSource":"one_minute_database","coverage":{"oneMinSuspendedDays":len(one_data["suspendedDays"]),"oneMinDays":len(one_data["days"]),"oneMinBars":len(one_data["bars"]),"oneMinStart":one_data["days"][0] if one_data["days"] else None,"oneMinEnd":one_data["days"][-1] if one_data["days"] else None,"fifteenDays":len(fifteen_data["days"]),"fifteenBars":len(fifteen_data["bars"]),"fifteenStart":fifteen_data["days"][0] if fifteen_data["days"] else None,"fifteenEnd":fifteen_data["days"][-1] if fifteen_data["days"] else None,"fifteenError":fifteen_error},"latest":latest_series}
-                limitup_info=previous_limitup_trading_info(code,date)
-                result["previousLimitUpTradingDays"]=limitup_info["days"]
-                result["previousLimitUpHistoricalFirst"]=limitup_info["historicalFirst"]
-                result["limitUpSpanVersion"]=4
-                result["chartSeriesVersion"]=7
-                return self.send_json(result)
+                version=stock_data_version()
+                def load_stock():
+                    end=datetime.datetime.strptime(date,"%Y%m%d").date(); start_1m=(end-datetime.timedelta(days=14)).strftime("%Y%m%d"); start_15m=shift_months(end,3).strftime("%Y%m%d")
+                    freshness="latest:" if latest else ""
+                    ttl=300 if latest else 7*24*3600
+                    latest_day=datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=8))).date()
+                    latest_end=latest_day.strftime("%Y%m%d")
+                    latest_basis=cached_series(f"series:v10:{code}:day-week-month:latest-basis:{latest_end}:{version['stockDataVersion']}",lambda:stock_series_latest(code,latest_end),300)
+                    basis_tag=f"{latest_end}:{latest_basis['adjustmentBase']}:{version['stockDataVersion']}"
+                    one_key=f"series:v7:{code}:minute:5d:qfq:{basis_tag}:{freshness}{date}"
+                    fifteen_key=f"series:v6:{code}:fifteen-minute:3m:qfq:{basis_tag}:{freshness}{date}"
+                    review_series=stock_series_for_date(latest_basis,date)
+                    daily=review_series["daily"]; weekly=review_series["weekly"]; monthly=review_series["monthly"]
+                    def load_one():
+                        return adjusted_one_min_payload(intraday_with_suspensions(code,start_1m,date),latest_basis)
+                    one_data=cached_series(one_key,load_one,ttl)
+                    def load_fifteen():
+                        native=get_fifteenMin(ts_code=code,start_date=start_15m,end_date=date)
+                        native=filter_after_close(native)
+                        native=drop_full_day_suspended_bars(native,code,start_15m,date)
+                        bars=adjusted_stock_intraday_bars(compact(native,"datetime"),latest_basis)
+                        days=sorted(native["datetime"].astype(str).str[:10].unique()) if not native.empty else []
+                        return {"bars":bars,"days":days}
+                    fifteen_error=None
+                    try: fifteen_data=cached_series(fifteen_key,load_fifteen,ttl)
+                    except Exception as exc:
+                        fifteen_error=str(exc); print("15-minute historical data unavailable:",fifteen_error,flush=True); fifteen_data={"bars":[],"days":[]}
+                    latest_end=latest_day.strftime("%Y%m%d"); latest_start_1m=(latest_day-datetime.timedelta(days=14)).strftime("%Y%m%d"); latest_start_15m=shift_months(latest_day,3).strftime("%Y%m%d")
+                    latest_ttl=300
+                    latest_series_data=stock_series_for_date(latest_basis,latest_end)
+                    latest_daily=latest_series_data["daily"]; latest_weekly=latest_series_data["weekly"]; latest_monthly=latest_series_data["monthly"]
+                    def load_latest_one():
+                        return adjusted_one_min_payload(intraday_with_suspensions(code,latest_start_1m,latest_end),latest_basis)
+                    latest_one=cached_series(f"series:v7:{code}:minute:5d:qfq:latest:{basis_tag}",load_latest_one,latest_ttl)
+                    def load_latest_fifteen():
+                        native=filter_after_close(get_fifteenMin(ts_code=code,start_date=latest_start_15m,end_date=latest_end))
+                        native=drop_full_day_suspended_bars(native,code,latest_start_15m,latest_end)
+                        bars=adjusted_stock_intraday_bars(compact(native,"datetime"),latest_basis); days=sorted(native["datetime"].astype(str).str[:10].unique()) if not native.empty else []
+                        return {"bars":bars,"days":days}
+                    latest_fifteen_error=None
+                    try: latest_fifteen=cached_series(f"series:v6:{code}:fifteen-minute:3m:qfq:latest:{basis_tag}",load_latest_fifteen,latest_ttl)
+                    except Exception as exc:
+                        latest_fifteen_error=str(exc); print("15-minute latest data unavailable:",latest_fifteen_error,flush=True)
+                        latest_fifteen={"bars":fifteen_data["bars"],"days":fifteen_data["days"]}
+                    latest_actual_date=latest_basis["latestDate"] or latest_end
+                    latest_series={"daily":latest_daily,"weekly":latest_weekly,"monthly":latest_monthly,"oneMin":latest_one["bars"],"fifteenMin":latest_fifteen["bars"],"suspendedDays":latest_one["suspendedDays"],"latestDate":latest_actual_date,"coverage":{"oneMinSuspendedDays":len(latest_one["suspendedDays"]),"oneMinDays":len(latest_one["days"]),"oneMinBars":len(latest_one["bars"]),"oneMinStart":latest_one["days"][0] if latest_one["days"] else None,"oneMinEnd":latest_one["days"][-1] if latest_one["days"] else None,"fifteenDays":len(latest_fifteen["days"]),"fifteenBars":len(latest_fifteen["bars"]),"fifteenStart":latest_fifteen["days"][0] if latest_fifteen["days"] else None,"fifteenEnd":latest_fifteen["days"][-1] if latest_fifteen["days"] else None,"fifteenError":latest_fifteen_error}}
+                    latest_date=latest_actual_date
+                    result={"code":code,"date":date,"latestMode":False,"latestDate":latest_date,"seriesReferenceDate":latest_end,"cacheBackend":CACHE.backend,"daily":daily,"weekly":weekly,"monthly":monthly,"oneMin":one_data["bars"],"fifteenMin":fifteen_data["bars"],"suspendedDays":one_data["suspendedDays"],"fifteenSource":"fifteen_minute_database","oneMinSource":"one_minute_database","coverage":{"oneMinSuspendedDays":len(one_data["suspendedDays"]),"oneMinDays":len(one_data["days"]),"oneMinBars":len(one_data["bars"]),"oneMinStart":one_data["days"][0] if one_data["days"] else None,"oneMinEnd":one_data["days"][-1] if one_data["days"] else None,"fifteenDays":len(fifteen_data["days"]),"fifteenBars":len(fifteen_data["bars"]),"fifteenStart":fifteen_data["days"][0] if fifteen_data["days"] else None,"fifteenEnd":fifteen_data["days"][-1] if fifteen_data["days"] else None,"fifteenError":fifteen_error},"latest":latest_series}
+                    limitup_info=previous_limitup_trading_info(code,date)
+                    result["previousLimitUpTradingDays"]=limitup_info["days"]
+                    result["previousLimitUpHistoricalFirst"]=limitup_info["historicalFirst"]
+                    result["limitUpSpanVersion"]=4
+                    result["chartSeriesVersion"]=7
+                    return {**result,**version}
+                payload,hit=cached_stock_response('stock-full:v1:'+code+':'+date+':'+version['stockDataVersion'],load_stock)
+                return self.send_json({**payload,**version},headers={'X-Chart-Cache':'process-memory' if hit else 'source-load'})
             if u.path.startswith("/api/"):
                 self.send_error(404)
             else:
