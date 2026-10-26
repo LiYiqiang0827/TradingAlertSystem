@@ -436,14 +436,14 @@
     }finally{livePushRunning=false;if(livePushPending&&!livePushTimer)livePushTimer=setTimeout(flushLivePush,100);}
   }
   function syncLivePushConnection(){
-    if(!liveEnabled||document.hidden){if(liveEventSource)liveEventSource.close();liveEventSource=null;document.documentElement.dataset.liveTransport='paused';return;}
+    if(!liveEnabled||document.hidden){if(liveEventSource)liveEventSource.close();liveEventSource=null;document.documentElement.dataset.liveTransport='paused';$('#liveDataToggle').title=liveEnabled?'页面在后台，推送暂停':'实时推送已暂停';return;}
     if(liveEventSource)return;
     if(!window.EventSource){document.documentElement.dataset.liveTransport='unsupported';return;}
-    const source=liveEventSource=new EventSource('/api/live-events');document.documentElement.dataset.liveTransport='connecting';
+    const source=liveEventSource=new EventSource('/api/live-events');document.documentElement.dataset.liveTransport='connecting';$('#liveDataToggle').title='正在连接主动推送';
     source.addEventListener('ready',event=>{if(source!==liveEventSource)return;document.documentElement.dataset.liveTransport='sse';$('#liveDataToggle').title='主动推送已连接（SSE）';queueLivePush(JSON.parse(event.data));});
     source.addEventListener('market',event=>{if(source!==liveEventSource)return;const data=JSON.parse(event.data);document.documentElement.dataset.liveEventId=event.lastEventId;document.documentElement.dataset.liveEventAt=data.receivedAt;queueLivePush(data);});
     source.addEventListener('heartbeat',event=>{if(source!==liveEventSource)return;const data=JSON.parse(event.data);if(data.status)receiveLiveMarketStatus(data.status);document.documentElement.dataset.liveHeartbeatAt=data.status?.serverTime||'';});
-    source.onerror=()=>{if(source===liveEventSource){document.documentElement.dataset.liveTransport='reconnecting';const label=$('#ladderLiveStatus');if(label)label.textContent='推送重连中 · 保留上一快照';}};
+    source.onerror=()=>{if(source===liveEventSource){document.documentElement.dataset.liveTransport='reconnecting';$('#liveDataToggle').title='主动推送重连中';const label=$('#ladderLiveStatus');if(label)label.textContent='推送重连中 · 保留上一快照';}};
   }
   function setupLiveNavigation(){
     updateMarketClock();setInterval(updateMarketClock,1000);
