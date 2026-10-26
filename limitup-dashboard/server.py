@@ -1408,6 +1408,101 @@ def ladder_data_version():
     return {"ladderDataVersion":database_revision((KPL_DB,BASIC_DB)),"ladderSeriesVersion":13,"cacheBackend":CACHE.backend}
 
 
+def live_ladder_index_quotes(day):
+    import redis
+    zone=datetime.timezone(datetime.timedelta(hours=8));now=datetime.datetime.now(zone)
+    key='ladder-live-index-quotes:v1:'+day
+    def load():
+        client=redis.Redis(host='127.0.0.1',port=6380,decode_responses=True,socket_timeout=2)
+        pipe=client.pipeline(transaction=False)
+        for code,_ in LIVE_INDEX_CATALOG:pipe.zrevrange('online:snapshot_index:window:'+code,0,0,withscores=True)
+        quotes=[]
+        for (code,name),ticks in zip(LIVE_INDEX_CATALOG,pipe.execute()):
+            data=fit_live_index_ticks(ticks,day,now);quote=data['quote'];bar=data['today']
+            if not quote or quote['ageSeconds']>120:continue
+            quotes.append({'code':code,'name':name,'close':quote['price'],'pct_chg':quote['pct'],'amount':bar['turnover']/1000 if bar else None,'quoteTime':quote['time']})
+        return quotes
+    return cached_series(key,load,10)
+
+
+def live_stock_chart(code,day):
+    """Historical adjusted bars plus current native TDX bars, with a short live cache."""
+    from zoneinfo import ZoneInfo
+    from coreClient.tdx_client import TdxClient
+    import redis
+    zone=ZoneInfo('Asia/Shanghai');now=datetime.datetime.now(zone)
+    if day!=now.strftime('%Y%m%d'):raise ValueError('实时接口仅支持当天，历史日期请读取离线行情')
+    revision=database_revision((BASIC_DB,))
+    def load():
+        client=None
+        for attempt in range(2):
+            try:client=TdxClient();break
+            except Exception:
+                if attempt:raise
+        try:
+            raw_one=client.download_one_minute(code,trade_date=day,max_pages=2)
+            raw_fifteen=client.download_fifteen_minute(code,trade_date=day,max_pages=2)
+        finally:
+            if client:client.disconnect()
+        def native_bars(rows,span):
+            result=[]
+            for row in rows:
+                local=datetime.datetime.fromisoformat(str(row['datetime'])).replace(tzinfo=zone)
+                minute=local.hour*60+local.minute
+                if local.strftime('%Y%m%d')!=day or not(9*60+30<=minute<=11*60+30 or 13*60<=minute<=15*60):continue
+                # TDX labels an unfinished bar by its period-end time.
+                if local.timestamp()>now.timestamp()+span*60:continue
+                bar={'timestamp':int(local.timestamp()*1000),**{field:float(row[field]) for field in ('open','high','low','close')},'volume':float(row.get('vol') or 0),'amount':float(row.get('amount') or 0),'partial':local.timestamp()>now.timestamp()}
+                if valid_live_ohlc(bar):result.append(bar)
+            return sorted(result,key=lambda bar:bar['timestamp'])
+        current_one=native_bars(raw_one,1);current_fifteen=native_bars(raw_fifteen,15)
+        if not current_one:raise ValueError('当天原生1分钟行情暂不可用，未用15分钟数据替代')
+        r=redis.Redis(host='127.0.0.1',port=6380,decode_responses=True,socket_timeout=2)
+        quote={};keys=r.zrevrange('online:snapshot:timeline',0,0)
+        if keys:
+            raw=r.hget(keys[0],code)
+            if raw:quote=json.loads(raw)
+        def quote_valid(q):
+            try:
+                stamp=float(q.get('snapshot_timestamp') or 0);stamp=stamp/1000 if stamp>1e12 else stamp
+                return -5<=now.timestamp()-stamp<=60
+            except (TypeError,ValueError):return False
+        if not quote_valid(quote):
+            try:
+                from coreClient.ths_client import fetch_snapshots
+                quote=next((item for item in fetch_snapshots([code]) if item.get('ts_code')==code),{})
+            except Exception:quote={}
+        if not quote_valid(quote):quote={}
+        date=datetime.datetime.strptime(day,'%Y%m%d').date();prior=(date-datetime.timedelta(days=1)).strftime('%Y%m%d')
+        basis=cached_series(f'live-hover-basis:v1:{code}:{prior}:{revision}',lambda:stock_series_latest(code,prior),300)
+        history=stock_series_for_date(basis,prior)
+        start=(date-datetime.timedelta(days=14)).strftime('%Y%m%d')
+        old_one=cached_series(f'live-hover-minute-history:v1:{code}:{prior}:{revision}',lambda:adjusted_one_min_payload(intraday_with_suspensions(code,start,prior),basis),300)
+        def old_fifteen():
+            frame=filter_after_close(get_fifteenMin(ts_code=code,start_date=shift_months(date,3).strftime('%Y%m%d'),end_date=prior)).copy()
+            if not frame.empty:frame['datetime']=frame['datetime'].astype(str).str[:19]+'+08:00'
+            return adjusted_stock_intraday_bars(compact(frame,'datetime'),basis)
+        past_fifteen=cached_series(f'live-hover-fifteen-history:v1:{code}:{prior}:{revision}',old_fifteen,300)
+        previous=basis['daily'][-1]['close'] if basis['daily'] else None
+        prior_close=quote.get('prev_price') or previous
+        # Rebase earlier adjusted prices when today's ex-rights previous close changes.
+        scale=float(prior_close)/float(previous) if previous and prior_close else 1
+        def rebase(bars):
+            return [{**bar,**{key:bar[key]*scale for key in ('open','high','low','close')},'volume':bar.get('volume',0)/scale} for bar in bars]
+        historical_daily=rebase(history['daily']);historical_one=rebase(old_one['bars']);historical_fifteen=rebase(past_fifteen)
+        close=float(current_one[-1]['close']);opening=float(quote.get('open_price') or current_one[0]['open'])
+        high=max(float(quote.get('high_price') or 0),max(bar['high'] for bar in current_one),close);low=min(float(quote.get('low_price') or high),min(bar['low'] for bar in current_one),close)
+        amount=max(float(quote.get('turnover') or 0),sum(bar['amount'] for bar in current_one));volume=max(float(quote.get('volume') or 0),sum(bar['volume'] for bar in current_one))
+        pct=(close/float(prior_close)-1)*100 if prior_close else None
+        daily=historical_daily+[{'timestamp':int(datetime.datetime.strptime(day,'%Y%m%d').replace(tzinfo=datetime.timezone.utc).timestamp()*1000),'open':opening,'high':high,'low':low,'close':close,'amount':amount/1000,'volume':volume/100,'pct_chg':pct}]
+        bars=historical_one+current_one;days=sorted({datetime.datetime.fromtimestamp(bar['timestamp']/1000,zone).strftime('%Y%m%d') for bar in bars})[-5:]
+        bars=[bar for bar in bars if datetime.datetime.fromtimestamp(bar['timestamp']/1000,zone).strftime('%Y%m%d') in days]
+        facts={'code':code,'date':day,'close':close,'pct':pct,'openPct':(opening/float(prior_close)-1)*100 if prior_close else None,'amplitude':(high-low)/float(prior_close)*100 if prior_close else None,'amount':amount,'floatMarketCap':None,'totalMarketCap':None,'freeFloatTurnover':None,'limitTime':None}
+        live=live_ladder_snapshot();facts['limitTime']=live.get('stocks',{}).get(code,{}).get('time')
+        return {'code':code,'date':day,'isLive':True,'updatedAt':now.isoformat(),'daily':daily,'oneMin':bars,'fifteenMin':historical_fifteen+current_fifteen,'suspendedDays':old_one['suspendedDays'],'previewFacts':facts,'sources':{'oneMin':'tdx_native_1min','fifteenMin':'tdx_native_15min','daily':'live_quote+native_minute'},'liveCoverage':{'oneMinBars':len(current_one),'fifteenMinBars':len(current_fifteen)}}
+    return cached_series(f'live-stock-hover:v2:{code}:{day}:{revision}',load,15)
+
+
 def live_ladder_snapshot():
     """Read-only intraday overlay. Never write live observations to the offline graph."""
     status=live_market_status();day=status['date'];now=datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=8))).timestamp()
@@ -2114,7 +2209,7 @@ class Handler(SimpleHTTPRequestHandler):
                 live=live_ladder_snapshot()
                 if safe_date(q.get('date',[''])[0])==live['date'] and live.get('available'):
                     info={key:live[key] for key in ('date','stocks','catalysts','freeFloatTurnoverByCode','indices','reasonAvailable','reasonSource','ttlSeconds','brokenStocks')}
-                    return self.send_json({**info,**ladder_data_version(),'promotionFailures':[]})
+                    return self.send_json({**info,**ladder_data_version(),'indices':live_ladder_index_quotes(live['date']),'promotionFailures':[]})
                 date=safe_date(q.get("date",[""])[0]);meta=ladder_data_version()
                 key=f"ladder-date-details:v3:{date}:{meta['ladderDataVersion']}:{database_revision((DBROOT / 'offline' / 'db_cn_index.db',))}"
                 payload=CACHE.get(key)
@@ -2126,7 +2221,7 @@ class Handler(SimpleHTTPRequestHandler):
                 live=live_ladder_snapshot()
                 if safe_date(q.get('date',[''])[0])==live['date'] and live.get('available'):
                     info={key:live[key] for key in ('date','stocks','catalysts','freeFloatTurnoverByCode','indices','reasonAvailable','reasonSource','ttlSeconds','brokenStocks')}
-                    return self.send_json({**info,**ladder_data_version(),'promotionFailures':[]})
+                    return self.send_json({**info,**ladder_data_version(),'indices':live_ladder_index_quotes(live['date']),'promotionFailures':[]})
                 date=safe_date(q.get("date",[""])[0]);meta=ladder_data_version()
                 key=f"ladder-topic-details:v5:{date}:{meta['ladderDataVersion']}"
                 payload=CACHE.get(key)
@@ -2329,6 +2424,10 @@ class Handler(SimpleHTTPRequestHandler):
                     return {"code":code,"name":index_names[code],"date":date,"daily":daily,"weekly":weekly,"monthly":monthly,"oneMin":one_min,"fifteenMin":fifteen,"coverage":{"oneMinBars":len(one_min),"oneMinDays":len(minute_dates),"oneMinStart":minute_dates[0] if minute_dates else None,"oneMinEnd":minute_dates[-1] if minute_dates else None,"fifteenDays":len(fifteen_dates),"fifteenStart":fifteen_dates[0] if fifteen_dates else None,"fifteenEnd":fifteen_dates[-1] if fifteen_dates else None,"oneMinError":minute_error,"fifteenError":fifteen_error},"sources":{"daily":"index_daily_database","weekly":"index_weekly_database","monthly":"index_monthly_database","minute":"tdx_native_index_1min","fifteenMin":"tdx_native_index_15min","minuteVolumeMetric":"source_turnover_yuan"}}
                 payload=cached_series(key,load_index,300 if date==datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=8))).strftime("%Y%m%d") else 7*24*3600)
                 return self.send_json({**payload,**version})
+            if u.path=="/api/live-stock-chart":
+                code=q.get('code',[''])[0];date=safe_date(q.get('date',[''])[0])
+                if not re.fullmatch(r'\d{6}\.(SH|SZ|BJ)',code):raise ValueError('股票代码无效')
+                return self.send_json(live_stock_chart(code,date))
             if u.path=="/api/stock-facts":
                 code=q.get("code",[""])[0];date=safe_date(q.get("date",[""])[0])
                 if not re.fullmatch(r"\d{6}\.(SH|SZ|BJ)",code):raise ValueError("股票代码无效")
