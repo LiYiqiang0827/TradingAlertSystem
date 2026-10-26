@@ -1,8 +1,8 @@
-"""Versioned Redis daily bases and correction-aware incremental week/month aggregation.
+"""Versioned Redis chart windows with stored offline period reuse.
 
-The source callback reads canonical daily observations on the latest adjustment base.
-Every changed source snapshot is compared in full, so historical repairs/deletions and
-adjustment changes are detected. Only affected calendar periods are re-aggregated.
+The loader supplies bounded latest-adjusted daily windows and precomputed weekly
+and monthly bars. Revision checks reject mixed snapshots during source updates.
+The legacy incremental aggregator remains available for daily-only loaders.
 """
 from __future__ import annotations
 from collections import OrderedDict
@@ -12,7 +12,7 @@ import threading
 import time
 from cache_singleflight import KeyedLocks
 
-_CACHE_VERSION = 1
+_CACHE_VERSION = 2
 _locks = KeyedLocks()
 _memory = OrderedDict()
 _memory_lock = threading.RLock()
@@ -75,10 +75,10 @@ def _remember(key, record):
             _, (_, old_size, _) = _memory.popitem(last=False); _memory_bytes -= old_size
 
 
-def read_basis(cache, code, cutoff, revision_fn, loader):
+def read_basis(cache, code, cutoff, revision_fn, loader, window="latest"):
     global _memory_bytes
-    key = f'stock-daily-basis:v{_CACHE_VERSION}:{code}'
-    with _locks.hold(code):
+    key = f'stock-daily-basis:v{_CACHE_VERSION}:{code}:{window}'
+    with _locks.hold(key):
         revision = revision_fn()
         record = None
         memory_hit = False
@@ -98,7 +98,7 @@ def read_basis(cache, code, cutoff, revision_fn, loader):
             raw = loader(code, cutoff)
             if revision_fn() == revision: break
         else: raise RuntimeError('Daily source changing; temporarily unavailable')
-        basis = aggregate_changed(raw, record.get('basis') if record else None)
+        basis = dict(raw) if 'weekly' in raw and 'monthly' in raw else aggregate_changed(raw, record.get('basis') if record else None)
         basis['dailyDataVersion'] = revision
         if basis['daily']:
             updated = {'revision': revision, 'cutoff': cutoff, 'basis': basis}
@@ -109,9 +109,9 @@ def read_basis(cache, code, cutoff, revision_fn, loader):
                     redis.call('EXPIRE',KEYS[1],604800)
                     local old=redis.call('ZRANGE',KEYS[1],0,-121)
                     for _,key in ipairs(old) do
-                        if string.sub(key,1,string.len('stock-daily-basis:v1:'))=='stock-daily-basis:v1:' then redis.call('DEL',key) end
+                        if string.sub(key,1,string.len('stock-daily-basis:v2:'))=='stock-daily-basis:v2:' then redis.call('DEL',key) end
                         redis.call('ZREM',KEYS[1],key)
                     end
-                    return #old""",1,'stock-daily-records:v1',time.time(),key)
+                    return #old""",1,'stock-daily-records:v2',time.time(),key)
             _remember(key, updated)
         return basis

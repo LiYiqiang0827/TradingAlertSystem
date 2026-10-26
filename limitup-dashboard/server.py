@@ -3,6 +3,7 @@
 from __future__ import annotations
 import copy, json, os, re, sqlite3, sys, datetime, traceback, calendar, bisect, math, hashlib, threading, gzip
 from functools import lru_cache
+from concurrent.futures import ThreadPoolExecutor
 from collections import OrderedDict
 import time
 from contextlib import closing, ExitStack
@@ -24,6 +25,8 @@ from coreClient.limitup_ladder import LimitupLadderStore, LadderNotReady
 from limitup_ladder.calculator import (LadderCalculator, is_closed_limit_up, consecutive_board_history,
     ladder_board_pattern, classify_limitup_traits)
 from limitup_ladder.live import overlay_live
+
+_chart_read_pool=ThreadPoolExecutor(max_workers=6,thread_name_prefix="stock-chart-read")
 
 LADDER_STORE=LimitupLadderStore()
 _ladder_dates_snapshot=None
@@ -466,8 +469,8 @@ def stock_data_version():
     paths=(BASIC_DB,KPL_DB,DBROOT/'offline'/'db_fifteenMinute.db',
            DBROOT/'offline'/'oneMinute'/'catalog.duckdb',DBROOT/'offline'/'oneMinute'/'catalog.duckdb.wal',
            DBROOT/'offline'/'fifteenMinute'/'fifteen_min.duckdb',DBROOT/'offline'/'fifteenMinute'/'fifteen_min.duckdb.wal')
-    return {'stockDataVersion':database_revision(paths),'stockFactsVersion':database_revision((BASIC_DB,KPL_DB)),
-            'dailyDataVersion':database_revision((BASIC_DB,)),
+    return {'stockDataVersion':'period-v2:'+database_revision(paths),'stockFactsVersion':database_revision((BASIC_DB,KPL_DB)),
+            'dailyDataVersion':stock_daily_revision(),
             'chartSeriesVersion':7,'stockVersionAt':datetime.datetime.now(datetime.timezone.utc).timestamp()}
 
 
@@ -1047,36 +1050,15 @@ def aggregate_stock_daily(frame, period):
         rows.append(row)
     return compact(pd.DataFrame(rows),"trade_date")
 
-def _load_stock_daily_basis(code, cutoff):
-    """Build one shared set of daily and period bars on the latest adjustment basis."""
-    import pandas as pd
-    with closing(sqlite3.connect(f"file:{BASIC_DB}?mode=ro",uri=True,timeout=5)) as conn:
-        daily=pd.read_sql_query(
-            "SELECT d.trade_date,d.open,d.high,d.low,d.close,d.vol,d.amount,d.pre_close,d.pct_chg,b.turnover_rate_f,b.free_share*b.close*10000 AS free_float_market_cap "
-            "FROM tbl_cn_day d LEFT JOIN tbl_cn_daily_basic b ON b.ts_code=d.ts_code AND b.trade_date=d.trade_date "
-            "WHERE d.ts_code=? AND d.trade_date<=? ORDER BY d.trade_date",conn,params=(code,cutoff))
-        if daily.empty: return {"daily":[],"weekly":[],"monthly":[],"latestDate":None,
-                                "adjustmentBase":1.0,"adjustmentFactors":[]}
-        last_day=str(daily["trade_date"].iloc[-1])
-        factors=pd.read_sql_query(
-            "SELECT trade_date,adj_factor FROM tbl_cn_adj_factor "
-            "WHERE ts_code=? AND trade_date<=? ORDER BY trade_date",conn,params=(code,last_day))
-    adjustment_base=1.0
-    adjustment_factors=[]
-    if not factors.empty:
-        factors["adj_factor"]=pd.to_numeric(factors["adj_factor"],errors="coerce")
-        factors=factors[factors["adj_factor"]>0]
-        if not factors.empty:
-            base=float(factors["adj_factor"].iloc[-1])
-            adjustment_base=base
-            adjustment_factors=[[str(day),float(value)] for day,value in factors[["trade_date","adj_factor"]].itertuples(index=False,name=None)]
-            factor_by_day=factors.set_index("trade_date")["adj_factor"]
-            scale=daily["trade_date"].map(factor_by_day).ffill().fillna(1.0)/base
-            for field in ("open","high","low","close","pre_close"):
-                daily[field]=pd.to_numeric(daily[field],errors="coerce")*scale
-            daily["vol"]=pd.to_numeric(daily["vol"],errors="coerce")/scale
-    return {"daily":compact(daily,"trade_date"),"latestDate":last_day,
-            "adjustmentBase":adjustment_base,"adjustmentFactors":adjustment_factors}
+def stock_daily_revision():
+    return "period-v2:"+database_revision((BASIC_DB,))
+
+
+def _load_stock_daily_basis(code, cutoff, review_month=None):
+    """Read bounded daily windows and the existing forward-adjusted period tables."""
+    from stock_period_basis import load_basis
+    return load_basis(BASIC_DB,code,cutoff,review_month or cutoff[:6],compact)
+
 
 # Daily bases depend only on daily/fundamental/adjustment source data, not minute files.
 _daily_preload_pool = None
@@ -1098,14 +1080,17 @@ def register_daily_hot(code):
         pipe.expire('stock-daily-hot:v1',7*86400);pipe.execute()
 
 
-def stock_series_latest(code,cutoff,register=True):
+def stock_series_latest(code,cutoff,register=True,review_date=None):
     from daily_basis_cache import read_basis
     if register:register_daily_hot(code)
-    return read_basis(CACHE,code,cutoff,lambda:database_revision((BASIC_DB,)),_load_stock_daily_basis)
+    month=min(review_date or cutoff,cutoff)[:6]
+    return read_basis(CACHE,code,cutoff,stock_daily_revision,
+                      lambda c,d:_load_stock_daily_basis(c,d,month),window=month)
 
 
-def stock_daily_payload(code,date):
-    today=live_market_status()['date'];basis=stock_series_latest(code,today)
+def stock_daily_payload(code,date,basis=None):
+    today=live_market_status()['date']
+    if basis is None:basis=stock_series_latest(code,today,review_date=date)
     end=datetime.datetime.strptime(date,'%Y%m%d').date();start=end-datetime.timedelta(days=2*366)
     bars=[bar for bar in basis['daily'] if start<=datetime.datetime.fromtimestamp(bar['timestamp']/1000,datetime.timezone.utc).date()<=end]
     return {'code':code,'date':date,'daily':bars,'dailyDataVersion':basis['dailyDataVersion'],
@@ -1113,20 +1098,25 @@ def stock_daily_payload(code,date):
 
 
 def stock_preview(code,date):
-    """The hover needs three series, not the full page's additional latest/week/month sets."""
+    """Read the three hover series concurrently; share cache keys with full pages."""
     version=stock_data_version()
     def load():
+        from stock_period_basis import latest_anchor
         end=datetime.datetime.strptime(date,'%Y%m%d').date();today=live_market_status()['date']
-        basis=stock_series_latest(code,today);basis_tag=f"{today}:{basis['adjustmentBase']}:{version['stockDataVersion']}"
-        start=(end-datetime.timedelta(days=14)).strftime('%Y%m%d')
-        one=cached_series(f'series:v7:{code}:minute:5d:qfq:{basis_tag}:{date}',lambda:adjusted_one_min_payload(intraday_with_suspensions(code,start,date),basis))
-        def load_fifteen():
-            first=shift_months(end,3).strftime('%Y%m%d')
-            frame=drop_full_day_suspended_bars(filter_after_close(get_fifteenMin(ts_code=code,start_date=first,end_date=date)),code,first,date)
-            days=sorted(frame['datetime'].astype(str).str[:10].unique()) if not frame.empty else []
-            return {'bars':adjusted_stock_intraday_bars(compact(frame,'datetime'),basis),'days':days}
-        fifteen=cached_series(f'series:v6:{code}:fifteen-minute:3m:qfq:{basis_tag}:{date}',load_fifteen)
-        daily=stock_daily_payload(code,date)
+        basis_future=_chart_read_pool.submit(stock_series_latest,code,today,True,date)
+        base=latest_anchor(BASIC_DB,code,today)[1]
+        basis_tag=f"{today}:{base}:{version['stockDataVersion']}"
+        one_key=f'series:v7:{code}:minute:5d:qfq:{basis_tag}:{date}'
+        fifteen_key=f'series:v6:{code}:fifteen-minute:3m:qfq:{basis_tag}:{date}'
+        keys=[one_key,fifteen_key];cached=dict(zip(keys,CACHE.get_many(keys)))
+        one_future=_chart_read_pool.submit(cached_intraday_windows,code,'oneMin',{
+            one_key:((end-datetime.timedelta(days=14)).strftime('%Y%m%d'),date,7*86400)},basis_future,cached)
+        fifteen_future=_chart_read_pool.submit(cached_intraday_windows,code,'fifteenMin',{
+            fifteen_key:(shift_months(end,3).strftime('%Y%m%d'),date,7*86400)},basis_future,cached)
+        basis=basis_future.result();one=one_future.result()[0][one_key]
+        fifteen_windows,errors=fifteen_future.result()
+        if errors:raise RuntimeError(next(iter(errors.values())))
+        fifteen=fifteen_windows[fifteen_key];daily=stock_daily_payload(code,date,basis)
         if stock_data_version()['stockDataVersion']!=version['stockDataVersion']:raise RuntimeError('Chart source changing; temporarily unavailable')
         return {**daily,'oneMin':one['bars'],'fifteenMin':fifteen['bars'],'suspendedDays':one['suspendedDays'],
                 'coverage':{'oneMinBars':len(one['bars']),'fifteenBars':len(fifteen['bars']),'fifteenError':None},
@@ -1299,7 +1289,8 @@ def stock_series_for_date(series, cutoff):
                 "amount":sum(bar.get("amount",0) for bar in bars)}
     weekly_start=end-datetime.timedelta(days=5*366)
     weekly=[bar for bar in series["weekly"] if weekly_start<=day_key(bar)<week_start]
-    monthly=[bar for bar in series["monthly"] if day_key(bar)<month_start]
+    monthly_start=end-datetime.timedelta(days=25*366)
+    monthly=[bar for bar in series["monthly"] if monthly_start<=day_key(bar)<month_start]
     for target,start in ((weekly,week_start),(monthly,month_start)):
         current=partial_period(start)
         if current: target.append(current)
@@ -1440,7 +1431,7 @@ def cached_series(key, loader, ttl=7*24*3600):
 
 
 
-def cached_intraday_windows(code, period, windows, basis):
+def cached_intraday_windows(code, period, windows, basis, initial_values=None):
     """Read missing selected/latest windows once per period, then slice locally.
 
     Keys retain the preview cache contract. Lock in sorted order so simultaneous
@@ -1448,7 +1439,7 @@ def cached_intraday_windows(code, period, windows, basis):
     Failed fifteen-minute reads are never cached as successful empty data.
     """
     keys=sorted(windows)
-    values=dict(zip(keys,CACHE.get_many(keys)))
+    values={key:initial_values.get(key) for key in keys} if initial_values is not None else dict(zip(keys,CACHE.get_many(keys)))
     missing=[key for key in keys if values[key] is None]
     errors={}
     with ExitStack() as locks:
@@ -1465,6 +1456,7 @@ def cached_intraday_windows(code, period, windows, basis):
                 # Storage returns normalized YYYYMMDD trade_date values. A union
                 # query keeps distant review/latest windows from reading the gap.
                 days=frame["trade_date"].astype(str).str.replace("-","",regex=False)
+                resolved_basis=basis.result() if hasattr(basis,"result") else basis
                 converted={}
                 for key in missing:
                     start,end,ttl=windows[key]
@@ -1472,10 +1464,10 @@ def cached_intraday_windows(code, period, windows, basis):
                     if identity not in converted:
                         native=frame.loc[days.between(start,end)].copy()
                         if period=="oneMin":
-                            data=adjusted_one_min_payload(intraday_with_suspensions(code,start,end,frame=native),basis)
+                            data=adjusted_one_min_payload(intraday_with_suspensions(code,start,end,frame=native),resolved_basis)
                         else:
                             native=drop_full_day_suspended_bars(filter_after_close(native),code,start,end)
-                            data={"bars":adjusted_stock_intraday_bars(compact(native,"datetime"),basis),
+                            data={"bars":adjusted_stock_intraday_bars(compact(native,"datetime"),resolved_basis),
                                   "days":sorted(native["datetime"].astype(str).str[:10].unique()) if not native.empty else []}
                         converted[identity]=data
                     values[key]=converted[identity]
@@ -2806,24 +2798,30 @@ class Handler(SimpleHTTPRequestHandler):
                     ttl=300 if latest else 7*24*3600
                     latest_day=datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=8))).date()
                     latest_end=latest_day.strftime("%Y%m%d")
-                    latest_basis=stock_series_latest(code,latest_end)
-                    basis_tag=f"{latest_end}:{latest_basis['adjustmentBase']}:{version['stockDataVersion']}"
+                    from stock_period_basis import latest_anchor
+                    basis_future=_chart_read_pool.submit(stock_series_latest,code,latest_end,True,date)
+                    adjustment_base=latest_anchor(BASIC_DB,code,latest_end)[1]
+                    basis_tag=f"{latest_end}:{adjustment_base}:{version['stockDataVersion']}"
                     one_key=f"series:v7:{code}:minute:5d:qfq:{basis_tag}:{freshness}{date}"
                     fifteen_key=f"series:v6:{code}:fifteen-minute:3m:qfq:{basis_tag}:{freshness}{date}"
-                    review_series=stock_series_for_date(latest_basis,date)
-                    daily=review_series["daily"]; weekly=review_series["weekly"]; monthly=review_series["monthly"]
                     latest_start_1m=(latest_day-datetime.timedelta(days=14)).strftime("%Y%m%d")
                     latest_start_15m=shift_months(latest_day,3).strftime("%Y%m%d")
                     latest_one_key=f"series:v7:{code}:minute:5d:qfq:latest:{basis_tag}"
                     latest_fifteen_key=f"series:v6:{code}:fifteen-minute:3m:qfq:latest:{basis_tag}"
-                    one_windows,_=cached_intraday_windows(code,"oneMin",{
-                        one_key:(start_1m,date,ttl),
-                        latest_one_key:(latest_start_1m,latest_end,300),
-                    },latest_basis)
-                    fifteen_windows,fifteen_errors=cached_intraday_windows(code,"fifteenMin",{
-                        fifteen_key:(start_15m,date,ttl),
-                        latest_fifteen_key:(latest_start_15m,latest_end,300),
-                    },latest_basis)
+                    keys=[one_key,fifteen_key,latest_one_key,latest_fifteen_key]
+                    cached=dict(zip(keys,CACHE.get_many(keys)))
+                    one_future=_chart_read_pool.submit(cached_intraday_windows,code,"oneMin",{
+                        one_key:(start_1m,date,ttl),latest_one_key:(latest_start_1m,latest_end,300),
+                    },basis_future,cached)
+                    fifteen_future=_chart_read_pool.submit(cached_intraday_windows,code,"fifteenMin",{
+                        fifteen_key:(start_15m,date,ttl),latest_fifteen_key:(latest_start_15m,latest_end,300),
+                    },basis_future,cached)
+                    span_future=_chart_read_pool.submit(previous_limitup_trading_info,code,date)
+                    latest_basis=basis_future.result()
+                    review_series=stock_series_for_date(latest_basis,date)
+                    daily=review_series["daily"];weekly=review_series["weekly"];monthly=review_series["monthly"]
+                    one_windows,_=one_future.result()
+                    fifteen_windows,fifteen_errors=fifteen_future.result()
                     one_data=one_windows[one_key]; latest_one=one_windows[latest_one_key]
                     fifteen_data=fifteen_windows[fifteen_key]; latest_fifteen=fifteen_windows[latest_fifteen_key]
                     fifteen_error=fifteen_errors.get(fifteen_key)
@@ -2834,11 +2832,12 @@ class Handler(SimpleHTTPRequestHandler):
                     latest_series={"daily":latest_daily,"weekly":latest_weekly,"monthly":latest_monthly,"oneMin":latest_one["bars"],"fifteenMin":latest_fifteen["bars"],"suspendedDays":latest_one["suspendedDays"],"latestDate":latest_actual_date,"coverage":{"oneMinSuspendedDays":len(latest_one["suspendedDays"]),"oneMinDays":len(latest_one["days"]),"oneMinBars":len(latest_one["bars"]),"oneMinStart":latest_one["days"][0] if latest_one["days"] else None,"oneMinEnd":latest_one["days"][-1] if latest_one["days"] else None,"fifteenDays":len(latest_fifteen["days"]),"fifteenBars":len(latest_fifteen["bars"]),"fifteenStart":latest_fifteen["days"][0] if latest_fifteen["days"] else None,"fifteenEnd":latest_fifteen["days"][-1] if latest_fifteen["days"] else None,"fifteenError":latest_fifteen_error}}
                     latest_date=latest_actual_date
                     result={"code":code,"date":date,"latestMode":False,"latestDate":latest_date,"seriesReferenceDate":latest_end,"cacheBackend":CACHE.backend,"daily":daily,"weekly":weekly,"monthly":monthly,"oneMin":one_data["bars"],"fifteenMin":fifteen_data["bars"],"suspendedDays":one_data["suspendedDays"],"fifteenSource":"fifteen_minute_database","oneMinSource":"one_minute_database","coverage":{"oneMinSuspendedDays":len(one_data["suspendedDays"]),"oneMinDays":len(one_data["days"]),"oneMinBars":len(one_data["bars"]),"oneMinStart":one_data["days"][0] if one_data["days"] else None,"oneMinEnd":one_data["days"][-1] if one_data["days"] else None,"fifteenDays":len(fifteen_data["days"]),"fifteenBars":len(fifteen_data["bars"]),"fifteenStart":fifteen_data["days"][0] if fifteen_data["days"] else None,"fifteenEnd":fifteen_data["days"][-1] if fifteen_data["days"] else None,"fifteenError":fifteen_error},"latest":latest_series}
-                    limitup_info=previous_limitup_trading_info(code,date)
+                    limitup_info=span_future.result()
                     result["previousLimitUpTradingDays"]=limitup_info["days"]
                     result["previousLimitUpHistoricalFirst"]=limitup_info["historicalFirst"]
                     result["limitUpSpanVersion"]=4
                     result["chartSeriesVersion"]=7
+                    if stock_data_version()['stockDataVersion']!=version['stockDataVersion']:raise RuntimeError('Chart source changing; temporarily unavailable')
                     return {**result,**version}
                 payload,hit=cached_stock_response('stock-full:v1:'+code+':'+date+':'+version['stockDataVersion'],load_stock)
                 return self.send_json({**payload,**version},headers={'X-Chart-Cache':'process-memory' if hit else 'source-load'})
