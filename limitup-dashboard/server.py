@@ -67,6 +67,13 @@ def live_monitor_data():
             if when.strftime("%Y%m%d")==status["date"] and client.exists(key):
                 count=client.hlen(key)
                 pool.update(count=count,available=True)
+        count,at=client.hmget('online:meta',kind+'_last_count',kind+'_last_ts')
+        try:
+            at=json.loads(at) if at and at.startswith('"') else at
+            when=datetime.datetime.fromisoformat(at)
+            if int(count)==0 and when.strftime('%Y%m%d')==status['date'] and (not pool['updatedAt'] or when.isoformat()>=pool['updatedAt']):
+                pool.update(count=0,available=True,updatedAt=when.isoformat())
+        except (TypeError,ValueError):pass
         pools[kind]=pool
     return {"status":status,"pools":pools}
 
@@ -292,7 +299,36 @@ class Cache:
             with self.lock:
                 self.db.execute("insert or replace into cache values (?,?,?)",(key,raw,int(datetime.datetime.now().timestamp())+ttl)); self.db.commit()
 
+    def delete(self,key):
+        if self.redis:self.redis.delete(key)
+        else:
+            with self.lock:self.db.execute('delete from cache where key=?',(key,));self.db.commit()
+
 CACHE=None
+PUSH_HUB=None
+
+def live_push_event(updates):
+    import redis
+    now=datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=8)))
+    client=redis.Redis(host='127.0.0.1',port=6380,decode_responses=True,socket_timeout=2)
+    kinds={item['kind'] for item in updates};quotes=[];indices=[]
+    for item in updates:
+        kind=item['kind'];archive=item.get('archive')
+        if kind not in ('snapshot','snapshot_index','limitperformance') or not archive:continue
+        if not archive.startswith('online:'+kind+':archive:'):continue
+        for code,raw in client.hgetall(archive).items():
+            row=json.loads(raw)
+            stamp=row.get('snapshot_index_timestamp',row.get('snapshot_timestamp',row.get('limitperformance_timestamp',item['emittedAt'])))
+            stamp=float(stamp);stamp=stamp/1000 if stamp>1e12 else stamp
+            quote={'code':code,'price':row.get('last_price',row.get('close_price')),
+                   'pct':row.get('price_change_ratio_pct',row.get('pct_chg')),'timestamp':stamp,
+                   'volume':row.get('volume'),'amount':row.get('turnover',row.get('amount'))}
+            (indices if kind=='snapshot_index' else quotes).append(quote)
+    if kinds&{'snapshot','limitperformance','zt','break'}:CACHE.delete('ladder-live-snapshot:v2:'+now.strftime('%Y%m%d'))
+    if 'snapshot_index' in kinds:CACHE.delete('ladder-live-index-quotes:v1:'+now.strftime('%Y%m%d'))
+    live=live_ladder_snapshot()
+    return {'updates':updates,'quotes':quotes,'indices':indices,'receivedAt':now.isoformat(),
+            'status':live_market_status(),'ladderStatus':{key:live.get(key) for key in ('date','available','updatedAt','revision','structureRevision','status','reason','frozen','sources')}}
 
 DATE_RE=re.compile(r"^20\d{6}$")
 def safe_date(value):
@@ -1415,11 +1451,13 @@ def live_ladder_index_quotes(day):
     def load():
         client=redis.Redis(host='127.0.0.1',port=6380,decode_responses=True,socket_timeout=2)
         pipe=client.pipeline(transaction=False)
-        for code,_ in LIVE_INDEX_CATALOG:pipe.zrevrange('online:snapshot_index:window:'+code,0,0,withscores=True)
+        recess=live_market_status()['phase']=='recess'
+        end=datetime.datetime.strptime(day+'113059','%Y%m%d%H%M%S').replace(tzinfo=zone).timestamp() if recess else now.timestamp()
+        for code,_ in LIVE_INDEX_CATALOG:pipe.zrevrangebyscore('online:snapshot_index:window:'+code,end,'-inf',start=0,num=1,withscores=True)
         quotes=[]
         for (code,name),ticks in zip(LIVE_INDEX_CATALOG,pipe.execute()):
             data=fit_live_index_ticks(ticks,day,now);quote=data['quote'];bar=data['today']
-            if not quote or quote['ageSeconds']>120:continue
+            if not quote or not recess and quote['ageSeconds']>120:continue
             quotes.append({'code':code,'name':name,'close':quote['price'],'pct_chg':quote['pct'],'amount':bar['turnover']/1000 if bar else None,'quoteTime':quote['time']})
         return quotes
     return cached_series(key,load,10)
@@ -1500,7 +1538,7 @@ def live_stock_chart(code,day):
         facts={'code':code,'date':day,'close':close,'pct':pct,'openPct':(opening/float(prior_close)-1)*100 if prior_close else None,'amplitude':(high-low)/float(prior_close)*100 if prior_close else None,'amount':amount,'floatMarketCap':None,'totalMarketCap':None,'freeFloatTurnover':None,'limitTime':None}
         live=live_ladder_snapshot();facts['limitTime']=live.get('stocks',{}).get(code,{}).get('time')
         return {'code':code,'date':day,'isLive':True,'updatedAt':now.isoformat(),'daily':daily,'oneMin':bars,'fifteenMin':historical_fifteen+current_fifteen,'suspendedDays':old_one['suspendedDays'],'previewFacts':facts,'sources':{'oneMin':'tdx_native_1min','fifteenMin':'tdx_native_15min','daily':'live_quote+native_minute'},'liveCoverage':{'oneMinBars':len(current_one),'fifteenMinBars':len(current_fifteen)}}
-    return cached_series(f'live-stock-hover:v2:{code}:{day}:{revision}',load,15)
+    return cached_series(f'live-stock-hover:v3:{code}:{day}:{revision}',load,6)
 
 
 def live_ladder_snapshot():
@@ -1531,15 +1569,30 @@ def live_ladder_snapshot():
                 if meta_time.tzinfo is None:meta_time=meta_time.replace(tzinfo=datetime.timezone(datetime.timedelta(hours=8)))
                 if int(count)==0 and meta_time.timestamp()>=t:return {},None
             except (TypeError,ValueError):pass
-            if datetime.datetime.fromtimestamp(t,datetime.timezone(datetime.timedelta(hours=8))).strftime('%Y%m%d')!=day or not -5<=now-t<=age:return {},None
-            if not r.exists(key):return {},None
+            allowed_age=max(age,now-datetime.datetime.strptime(day+'110000','%Y%m%d%H%M%S').replace(tzinfo=datetime.timezone(datetime.timedelta(hours=8))).timestamp()) if status['phase']=='recess' else age
+            if datetime.datetime.fromtimestamp(t,datetime.timezone(datetime.timedelta(hours=8))).strftime('%Y%m%d')!=day or not -5<=now-t<=allowed_age:return {},None
+            if not r.exists(key):
+                if status['phase']!='recess':return {},None
+                # Pool archives expire after 5 minutes. The independent source
+                # stream retains the complete last morning batch across lunch.
+                entries=r.xrevrange('online:'+kind+':stream',count=5000)
+                if not entries:return {},None
+                field=kind+'_timestamp';latest_stamp=stamp(entries[0][1].get(field));result={}
+                if not latest_stamp or datetime.datetime.fromtimestamp(latest_stamp,datetime.timezone(datetime.timedelta(hours=8))).strftime('%Y%m%d')!=day:return {},None
+                for _,fields in entries:
+                    if stamp(fields.get(field))!=latest_stamp:break
+                    code=fields.get('ts_code')
+                    if code:result[code]=dict(fields)
+                return result,latest_stamp
             result={}
             for code,raw in r.hgetall(key).items():
                 try:result[code]=json.loads(raw)
                 except (ValueError,TypeError):pass
             return result,t
         zt,zt_time=read('zt',180);broken,break_time=read('break',180);performance,lp_time=read('limitperformance',120);quotes,quote_time=read('snapshot',45)
-        if zt_time is None and lp_time is None:return empty
+        if zt_time is None and lp_time is None:
+            previous=CACHE.get('ladder-live-last:v1:'+day) if status['phase']=='recess' else None
+            return {**previous,'status':status,'frozen':True} if previous else empty
         with sqlite3.connect(f'file:{BASIC_DB}?mode=ro',uri=True,timeout=3) as c:
             limits={code:(up,down) for code,up,down in c.execute('SELECT ts_code,up_limit,down_limit FROM tbl_cn_stk_limit WHERE trade_date=?',(day,))}
             names=dict(c.execute('SELECT ts_code,name FROM tbl_cn_basic'))
@@ -1553,7 +1606,7 @@ def live_ladder_snapshot():
             for item,field,t in ((z,'last_price',zt_time),(b,'last_price',break_time),(lp,'close_price',lp_time),(q,'last_price',stamp(q.get('snapshot_timestamp')))):
                 try:
                     price=float(item.get(field));t=stamp(t)
-                    if price>0 and t and -5<=now-t<=180:options.append((t,price,item))
+                    if price>0 and t and -5<=now-t<=(max(180,now-datetime.datetime.strptime(day+'110000','%Y%m%d%H%M%S').replace(tzinfo=datetime.timezone(datetime.timedelta(hours=8))).timestamp()) if status['phase']=='recess' else 180):options.append((t,price,item))
                 except (TypeError,ValueError):pass
             if not options:continue
             t,price,item=max(options,key=lambda v:v[0]);up,down=limits.get(code,(None,None))
@@ -1576,7 +1629,13 @@ def live_ladder_snapshot():
         latest=max(t for t in [zt_time,break_time,lp_time,quote_time] if t)
         broken_stocks=[{'id':day+':'+code+':broken','date':day,'code':code,'name':v['name'],'theme':v['theme'],'originalTheme':v['theme'],'status':'broken','board':0,'pct':v['pct'],'time':str(v['lu_time']),'isLive':True} for code,v in failed.items() if code not in prior_sealed]
         result={**empty,'reason':'','brokenStocks':broken_stocks,'available':True,'rows':rows,'pool':sealed,'failed':failed,'stocks':details,'updatedAt':datetime.datetime.fromtimestamp(latest,datetime.timezone(datetime.timedelta(hours=8))).isoformat(),'revision':hashlib.sha256(json.dumps([zt_time,break_time,lp_time,quote_time],sort_keys=True).encode()).hexdigest()[:16], 'sources':{'zt':zt_time,'break':break_time,'performance':lp_time,'quotes':quote_time},'ttlSeconds':10,'catalysts':{},'freeFloatTurnoverByCode':{},'indices':[],'reasonAvailable':False,'reasonSource':'kpl_realtime'}
-        CACHE.set(cache_key,result,10);return result
+        structure={'sealed':[(code,item['theme'],item['board_period'],item['lu_time']) for code,item in sorted(sealed.items())],
+                   'failed':[(code,item['theme']) for code,item in sorted(failed.items())], 'known':sorted(rows),
+                   'unpromotedOrder':sorted((code for code in prior_sealed if code in rows and code not in sealed),key=lambda code:(-(rows[code]['pct_chg'] if rows[code]['pct_chg'] is not None else -float('inf')),code))}
+        result.update(structureRevision=hashlib.sha256(json.dumps(structure,sort_keys=True).encode()).hexdigest()[:16],frozen=status['phase']=='recess')
+        CACHE.set(cache_key,result,10)
+        CACHE.set('ladder-live-last:v1:'+day,result,12*3600)
+        return result
     except Exception as exc:
         print('live ladder unavailable',type(exc).__name__,str(exc),flush=True);return empty
 
@@ -1853,7 +1912,7 @@ def limitup_ladder_data(end_date,sessions=5,live=None):
             if code not in prior_failed:live_broken.append({'id':day+':'+code+':broken','date':day,'code':code,'name':item['name'],'theme':item['theme'],'originalTheme':item['theme'],'status':'broken','board':0,'pct':item['pct'],'time':clock(item['lu_time']),'isLive':True})
         for stock in visible+context+nodes+unpromoted+live_broken:
             if stock['date']==day:stock.update(isLive=True,pct=live['rows'].get(stock['code'],{}).get('pct_chg'),pctSource='live_quote')
-    return {'live':{key:live[key] for key in ('date','updatedAt','revision','sources')} if live else None,'brokenStocks':live_broken,'relimitLinks':relimit_links,'relimitContextStocks':list(relimit_context.values()),'relimitBrokenStocks':list(relimit_broken.values()),'sealedStocks':visible,'contextStocks':context,'suspendedStocks':[],'suspensionCarry':suspension_carry,'unpromotedStocks':unpromoted,'date':end_date,'dates':dates,'previousDates':previous_dates,'nodes':nodes,'links':links,'themes':[{'name':name} for name in themes],'firstCounts':first_counts,'source':'kpl_performance_board_pattern+verified_actual_limitup_paths'}
+    return {'live':{key:live[key] for key in ('date','updatedAt','revision','structureRevision','frozen','sources')} if live else None,'brokenStocks':live_broken,'relimitLinks':relimit_links,'relimitContextStocks':list(relimit_context.values()),'relimitBrokenStocks':list(relimit_broken.values()),'sealedStocks':visible,'contextStocks':context,'suspendedStocks':[],'suspensionCarry':suspension_carry,'unpromotedStocks':unpromoted,'date':end_date,'dates':dates,'previousDates':previous_dates,'nodes':nodes,'links':links,'themes':[{'name':name} for name in themes],'firstCounts':first_counts,'source':'kpl_performance_board_pattern+verified_actual_limitup_paths'}
 
 
 def ladder_stock_facts(date,code):
@@ -2123,12 +2182,34 @@ class Handler(SimpleHTTPRequestHandler):
         self.send_header("Vary","Accept-Encoding")
         if compressed: self.send_header("Content-Encoding","gzip")
         self.send_header("Content-Length",str(len(body)));self.end_headers();self.wfile.write(body)
+    def live_events(self):
+        import queue
+        token,mailbox=PUSH_HUB.subscribe()
+        self.send_response(200);self.send_header('Content-Type','text/event-stream; charset=utf-8')
+        self.send_header('Cache-Control','no-cache, no-transform');self.send_header('X-Accel-Buffering','no')
+        self.send_header('Connection','keep-alive');self.end_headers();self.connection.settimeout(8)
+        def send(kind,payload,identifier=None):
+            frame=('id: '+identifier+'\n' if identifier else '')+'event: '+kind+'\ndata: '+json.dumps(payload,ensure_ascii=False,separators=(',',':'))+'\n\n'
+            self.wfile.write(frame.encode());self.wfile.flush()
+        try:
+            self.wfile.write(b'retry: 3000\n\n');self.wfile.flush()
+            send('ready',{'status':live_market_status(),'resync':True,'transport':'sse'})
+            while True:
+                try:event=mailbox.get(timeout=15)
+                except queue.Empty:
+                    send('heartbeat',{'status':live_market_status(),'health':PUSH_HUB.status()});continue
+                send('market',event,event['id'])
+        except (BrokenPipeError,ConnectionResetError,TimeoutError,OSError):pass
+        finally:PUSH_HUB.unsubscribe(token);self.close_connection=True
+
     def do_GET(self):
         u=urlparse(self.path); q=parse_qs(u.query)
         try:
+            if u.path=='/api/live-events':return self.live_events()
+            if u.path=='/api/live-push-status':return self.send_json(PUSH_HUB.status())
             if u.path=="/api/ladder-live-status":
                 live=live_ladder_snapshot()
-                return self.send_json({key:live.get(key) for key in ('date','available','updatedAt','revision','status','reason')})
+                return self.send_json({key:live.get(key) for key in ('date','available','updatedAt','revision','structureRevision','frozen','sources','status','reason')})
             if u.path=="/api/ladder-version":
                 return self.send_json(ladder_data_version())
             if u.path=="/api/index-version":
@@ -2241,7 +2322,7 @@ class Handler(SimpleHTTPRequestHandler):
                 if not 1<=sessions<=30:raise ValueError("天梯窗口支持1至30个交易日")
                 meta=ladder_data_version();live=live_ladder_snapshot()
                 if date==live['date'] and live.get('available'):
-                    key=f"limitup-ladder-live:v4:{date}:{sessions}:{live['revision']}:{meta['ladderDataVersion']}"
+                    key=f"limitup-ladder-live:v5:{date}:{sessions}:{live['revision']}:{meta['ladderDataVersion']}"
                     payload=cached_series(key,lambda:{**limitup_ladder_data(date,sessions,live),**meta,'cacheTtlSeconds':10},10)
                     return self.send_json(payload)
                 key=f"limitup-ladder:v16:{date}:{sessions}:{meta['ladderDataVersion']}"
@@ -2525,6 +2606,8 @@ class Handler(SimpleHTTPRequestHandler):
 
 if __name__=="__main__":
     CACHE=Cache()
+    from live_push import LivePushHub
+    PUSH_HUB=LivePushHub(live_push_event);PUSH_HUB.start()
     port=int(os.environ.get("TRADINGALERT_PORT","8765")); host=os.environ.get("TRADINGALERT_HOST","127.0.0.1")
     print(f"TradingAlert dashboard on http://{host}:{port} (read-only)",flush=True)
     ThreadingHTTPServer((host,port),Handler).serve_forever()
