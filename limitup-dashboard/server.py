@@ -324,11 +324,11 @@ def live_push_event(updates):
                    'pct':row.get('price_change_ratio_pct',row.get('pct_chg')),'timestamp':stamp,
                    'volume':row.get('volume'),'amount':row.get('turnover',row.get('amount'))}
             (indices if kind=='snapshot_index' else quotes).append(quote)
-    if kinds&{'snapshot','limitperformance','zt','break'}:CACHE.delete('ladder-live-snapshot:v2:'+now.strftime('%Y%m%d'))
+    if kinds&{'snapshot','limitperformance','zt','break'}:CACHE.delete('ladder-live-snapshot:v4:'+now.strftime('%Y%m%d'))
     if 'snapshot_index' in kinds:CACHE.delete('ladder-live-index-quotes:v1:'+now.strftime('%Y%m%d'))
     live=live_ladder_snapshot()
     return {'updates':updates,'quotes':quotes,'indices':indices,'receivedAt':now.isoformat(),
-            'status':live_market_status(),'ladderStatus':{key:live.get(key) for key in ('date','available','updatedAt','revision','structureRevision','status','reason','frozen','sources')}}
+            'status':live_market_status(),'ladderStatus':{key:live.get(key) for key in ('date','available','updatedAt','revision','structureRevision','status','reason','frozen','sources','mode','offlineReady','sourceKinds')}}
 
 DATE_RE=re.compile(r"^20\d{6}$")
 def safe_date(value):
@@ -1451,6 +1451,9 @@ def live_ladder_index_quotes(day):
     key='ladder-live-index-quotes:v1:'+day
     def load():
         client=redis.Redis(host='127.0.0.1',port=6380,decode_responses=True,socket_timeout=2)
+        if live_market_status()['phase']=='closed':
+            records,at,_=read_online_close('snapshot_index',day,client)
+            return [{'code':code,'name':name,'close':records[code].get('last_price'),'pct_chg':records[code].get('price_change_ratio_pct'),'amount':float(records[code]['turnover'])/1000 if records[code].get('turnover') is not None else None,'quoteTime':datetime.datetime.fromtimestamp(at,zone).isoformat()} for code,name in LIVE_INDEX_CATALOG if code in records]
         pipe=client.pipeline(transaction=False)
         recess=live_market_status()['phase']=='recess'
         end=datetime.datetime.strptime(day+'113059','%Y%m%d%H%M%S').replace(tzinfo=zone).timestamp() if recess else now.timestamp()
@@ -1542,22 +1545,103 @@ def live_stock_chart(code,day):
     return cached_series(f'live-stock-hover:v4:{code}:{day}:{revision}',load,6)
 
 
+def offline_ladder_ready(day):
+    """Only hand over when daily prices cover today's pool and yesterday's promotion cohort."""
+    version=database_revision((BASIC_DB,KPL_DB));key='ladder-offline-ready:v1:'+day+':'+version
+    cached=CACHE.get(key)
+    if cached is not None:return cached
+    ready=False
+    try:
+        if day in market_data_dates():
+            with sqlite3.connect(f'file:{KPL_DB}?mode=ro',uri=True,timeout=3) as c:
+                expected=set()
+                for table,condition in [('tbl_cn_kpl_limit_performance',''),('tbl_cn_kpl_list'," AND tag='涨停'"),('tbl_cn_limit_list'," AND \"limit\"='U'")]:
+                    if c.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",(table,)).fetchone():expected.update(row[0] for row in c.execute(f'SELECT ts_code FROM {table} WHERE trade_date=?'+condition,(day,)))
+            with sqlite3.connect(f'file:{BASIC_DB}?mode=ro',uri=True,timeout=3) as c:
+                previous=c.execute('SELECT MAX(trade_date) FROM tbl_cn_day WHERE trade_date<?',(day,)).fetchone()[0]
+                expected.update(row[0] for row in c.execute('SELECT d.ts_code FROM tbl_cn_day d JOIN tbl_cn_stk_limit l ON l.ts_code=d.ts_code AND l.trade_date=d.trade_date WHERE d.trade_date=? AND l.up_limit>0 AND abs(d.close-l.up_limit)<.005',(previous,)))
+                actual={row[0] for row in c.execute('SELECT d.ts_code FROM tbl_cn_day d JOIN tbl_cn_stk_limit l ON l.ts_code=d.ts_code AND l.trade_date=d.trade_date WHERE d.trade_date=? AND d.close IS NOT NULL',(day,))}
+                suspended={row[0] for row in c.execute("SELECT ts_code FROM tbl_cn_suspend WHERE trade_date=? AND suspend_type='S' AND coalesce(suspend_timing,'')=''",(day,))}
+                ready=bool(actual) and expected.issubset(actual|suspended)
+    except sqlite3.Error:pass
+    CACHE.set(key,ready,60);return ready
+
+
+def online_stamp(value):
+    try:
+        result=float(value);return result/1000 if result>1e12 else result
+    except (TypeError,ValueError):
+        try:
+            result=datetime.datetime.fromisoformat(str(value));zone=datetime.timezone(datetime.timedelta(hours=8))
+            return (result if result.tzinfo else result.replace(tzinfo=zone)).timestamp()
+        except (ValueError,TypeError):return 0
+
+
+def read_online_close(kind,day,client=None):
+    """Redis last batch first, with durable online SQLite fallback after archive expiry."""
+    zone=datetime.timezone(datetime.timedelta(hours=8));field=kind+'_timestamp'
+    def same_day(value):return value and datetime.datetime.fromtimestamp(value,zone).strftime('%Y%m%d')==day
+    try:
+        if client is not None:
+            last=client.zrevrange('online:'+kind+':timeline',0,0,withscores=True)
+            latest=online_stamp(last[0][1]) if last else 0
+            count,at=client.hmget('online:meta',kind+'_last_count',kind+'_last_ts')
+            if at and at.startswith('"'):at=json.loads(at)
+            zero=online_stamp(at)
+            if count is not None and int(count)==0 and same_day(zero) and zero>=latest:return {},zero,'redis-empty'
+            if last and same_day(latest):
+                archive=client.hgetall(last[0][0])
+                if archive:return {code:json.loads(raw) for code,raw in archive.items()},latest,'redis-archive'
+                entries=client.xrevrange('online:'+kind+':stream',count=5000)
+                if entries:
+                    latest=online_stamp(entries[0][1].get(field));rows={}
+                    if same_day(latest):
+                        for _,row in entries:
+                            if online_stamp(row.get(field))<latest-(60 if kind in ('snapshot','snapshot_index') else 0):break
+                            if row.get('ts_code'):rows.setdefault(row['ts_code'],dict(row))
+                        if rows:return rows,latest,'redis-stream'
+    except Exception:pass
+    database=DBROOT/'online'/('online_data_'+day[:6]+'.db');table=kind+'_'+day
+    if not database.exists():return {},None,'unavailable'
+    try:
+        with sqlite3.connect(f'file:{database}?mode=ro',uri=True,timeout=3) as c:
+            c.row_factory=sqlite3.Row
+            if not c.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",(table,)).fetchone():return {},None,'unavailable'
+            actual_field='snapshot_timestamp' if kind=='snapshot_index' else field
+            latest=c.execute(f'SELECT MAX({actual_field}) FROM {table} WHERE trade_date=?',(day,)).fetchone()[0]
+            stamp=online_stamp(latest)
+            if not same_day(stamp):return {},None,'unavailable'
+            if kind in ('snapshot','snapshot_index'):
+                lower=datetime.datetime.fromtimestamp(stamp-60,zone).isoformat(timespec='milliseconds')
+                records=c.execute(f'SELECT * FROM {table} WHERE trade_date=? AND {actual_field}>=? AND {actual_field}<=? ORDER BY {actual_field}',(day,lower,latest))
+            else:records=c.execute(f'SELECT * FROM {table} WHERE {actual_field}=?',(latest,))
+            rows={}
+            for record in records:
+                row=dict(record);row[field]=online_stamp(row[actual_field]);rows[row['ts_code']]=row
+            return rows,stamp,'online-sqlite'
+    except sqlite3.Error:return {},None,'unavailable'
+
+
 def live_ladder_snapshot():
     """Read-only intraday overlay. Never write live observations to the offline graph."""
     status=live_market_status();day=status['date'];now=datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=8))).timestamp()
     empty={'date':day,'available':False,'status':status,'reason':'当前不在盘中或没有新鲜快照'}
-    if status['phase'] not in ('trading','recess'):return empty
-    cache_key='ladder-live-snapshot:v2:'+day
+    closed=status['phase']=='closed' and datetime.datetime.fromtimestamp(now,datetime.timezone(datetime.timedelta(hours=8))).hour>=15
+    ready=offline_ladder_ready(day) if closed else False
+    empty.update(offlineReady=ready,mode='offline' if ready else 'close' if closed else 'live')
+    if ready:return {**empty,'reason':'当日离线行情已就绪'}
+    if status['phase'] not in ('trading','recess') and not closed:return empty
+    cache_key='ladder-live-snapshot:v4:'+day+(':'+database_revision((BASIC_DB,KPL_DB)) if closed else '')
     cached=CACHE.get(cache_key)
     if cached is not None:return cached
     try:
         import redis
         r=redis.Redis(host='127.0.0.1',port=6380,decode_responses=True,socket_connect_timeout=.5,socket_timeout=2)
-        def stamp(value):
-            try:
-                value=float(value);return value/1000 if value>1e12 else value
-            except (TypeError,ValueError):return 0
+        stamp=online_stamp
+        source_kinds={}
         def read(kind,age):
+            if closed:
+                rows,at,source=read_online_close(kind,day,r);source_kinds[kind]=source;return rows,at
             last=r.zrevrange('online:'+kind+':timeline',0,0,withscores=True)
             if not last:return {},None
             key,t=last[0];t=stamp(t)
@@ -1592,8 +1676,8 @@ def live_ladder_snapshot():
             return result,t
         zt,zt_time=read('zt',180);broken,break_time=read('break',180);performance,lp_time=read('limitperformance',120);quotes,quote_time=read('snapshot',45)
         if zt_time is None and lp_time is None:
-            previous=CACHE.get('ladder-live-last:v1:'+day) if status['phase']=='recess' else None
-            return {**previous,'status':status,'frozen':True} if previous else empty
+            previous=CACHE.get('ladder-live-last:v1:'+day) if status['phase']=='recess' or closed else None
+            return {**previous,'status':status,'frozen':True,'mode':'close' if closed else 'live','offlineReady':False} if previous else empty
         with sqlite3.connect(f'file:{BASIC_DB}?mode=ro',uri=True,timeout=3) as c:
             limits={code:(up,down) for code,up,down in c.execute('SELECT ts_code,up_limit,down_limit FROM tbl_cn_stk_limit WHERE trade_date=?',(day,))}
             names=dict(c.execute('SELECT ts_code,name FROM tbl_cn_basic'))
@@ -1607,7 +1691,7 @@ def live_ladder_snapshot():
             for item,field,t in ((z,'last_price',zt_time),(b,'last_price',break_time),(lp,'close_price',lp_time),(q,'last_price',stamp(q.get('snapshot_timestamp')))):
                 try:
                     price=float(item.get(field));t=stamp(t)
-                    if price>0 and t and -5<=now-t<=(max(180,now-datetime.datetime.strptime(day+'110000','%Y%m%d%H%M%S').replace(tzinfo=datetime.timezone(datetime.timedelta(hours=8))).timestamp()) if status['phase']=='recess' else 180):options.append((t,price,item))
+                    if price>0 and t and datetime.datetime.fromtimestamp(t,datetime.timezone(datetime.timedelta(hours=8))).strftime('%Y%m%d')==day and (closed or -5<=now-t<=(max(180,now-datetime.datetime.strptime(day+'110000','%Y%m%d%H%M%S').replace(tzinfo=datetime.timezone(datetime.timedelta(hours=8))).timestamp()) if status['phase']=='recess' else 180)):options.append((t,price,item))
                 except (TypeError,ValueError):pass
             if not options:continue
             t,price,item=max(options,key=lambda v:v[0]);up,down=limits.get(code,(None,None))
@@ -1620,6 +1704,7 @@ def live_ladder_snapshot():
             if not re.fullmatch(r'\d+天\d+板',pattern):pattern=''
             theme=str(lp.get('theme') or '').strip() or '暂无题材'
             time=lp.get('lu_time') or z.get('limit_up_time') or ''
+            if online_stamp(time):time=datetime.datetime.fromtimestamp(online_stamp(time),datetime.timezone(datetime.timedelta(hours=8))).strftime('%H:%M:%S')
             if str(time).isdigit() and len(str(time))>=10:time=datetime.datetime.fromtimestamp(float(time),datetime.timezone(datetime.timedelta(hours=8))).strftime('%H:%M:%S')
             if re.fullmatch(r'\d{2}:\d{2}',str(time)):time=str(time)+':00'
             record={'trade_date':day,'ts_code':code,'name':name,'theme':theme,'lu_time':time,'close_price':price,'board_period':pattern}
@@ -1633,8 +1718,8 @@ def live_ladder_snapshot():
         structure={'sealed':[(code,item['theme'],item['board_period'],item['lu_time']) for code,item in sorted(sealed.items())],
                    'failed':[(code,item['theme']) for code,item in sorted(failed.items())], 'known':sorted(rows),
                    'unpromotedOrder':sorted((code for code in prior_sealed if code in rows and code not in sealed),key=lambda code:(-(rows[code]['pct_chg'] if rows[code]['pct_chg'] is not None else -float('inf')),code))}
-        result.update(structureRevision=hashlib.sha256(json.dumps(structure,sort_keys=True).encode()).hexdigest()[:16],frozen=status['phase']=='recess')
-        CACHE.set(cache_key,result,10)
+        result.update(structureRevision=hashlib.sha256(json.dumps(structure,sort_keys=True).encode()).hexdigest()[:16],frozen=status['phase']=='recess' or closed,mode='close' if closed else 'live',offlineReady=False,sourceKinds=source_kinds)
+        CACHE.set(cache_key,result,60 if closed else 10)
         CACHE.set('ladder-live-last:v1:'+day,result,12*3600)
         return result
     except Exception as exc:
@@ -1876,7 +1961,7 @@ def limitup_ladder_data(end_date,sessions=5,live=None):
                 target={'id':end_date+':'+node['code']+':paused','date':end_date,'code':node['code'],'name':node['name'],'theme':node['theme'],'board':0,'previousBoard':node['board'],'status':'paused','time':'','representative':False,'firstCount':0,'members':[]}
                 nodes.append(target);links.append({'source':node['id'],'target':target['id'],'status':'paused','value':1})
             continue
-        raw=daily.get((active,node['code']));status='pending' if live and active==live['date'] or active==now.strftime('%Y%m%d') and now.hour<15 and raw is None else 'failed'
+        raw=daily.get((active,node['code']));status='pending' if live and active==live['date'] and (live.get('mode')!='close' or raw is None) or active==now.strftime('%Y%m%d') and now.hour<15 and raw is None else 'failed'
         target={'id':active+':'+node['code']+':'+status,'date':active,'code':node['code'],'name':node['name'],'theme':node['theme'],'board':0,'previousBoard':node['board'],'status':status,'pct':raw['pct_chg'] if raw else None,'time':'','representative':False,'firstCount':0,'members':[]}
         nodes.append(target);links.append({'source':node['id'],'target':target['id'],'status':status,'value':1})
     links=list({(edge['source'],edge['target']):edge for edge in links}.values())
@@ -1913,7 +1998,7 @@ def limitup_ladder_data(end_date,sessions=5,live=None):
             if code not in prior_failed:live_broken.append({'id':day+':'+code+':broken','date':day,'code':code,'name':item['name'],'theme':item['theme'],'originalTheme':item['theme'],'status':'broken','board':0,'pct':item['pct'],'time':clock(item['lu_time']),'isLive':True})
         for stock in visible+context+nodes+unpromoted+live_broken:
             if stock['date']==day:stock.update(isLive=True,pct=live['rows'].get(stock['code'],{}).get('pct_chg'),pctSource='live_quote')
-    return {'live':{key:live[key] for key in ('date','updatedAt','revision','structureRevision','frozen','sources')} if live else None,'brokenStocks':live_broken,'relimitLinks':relimit_links,'relimitContextStocks':list(relimit_context.values()),'relimitBrokenStocks':list(relimit_broken.values()),'sealedStocks':visible,'contextStocks':context,'suspendedStocks':[],'suspensionCarry':suspension_carry,'unpromotedStocks':unpromoted,'date':end_date,'dates':dates,'previousDates':previous_dates,'nodes':nodes,'links':links,'themes':[{'name':name} for name in themes],'firstCounts':first_counts,'source':'kpl_performance_board_pattern+verified_actual_limitup_paths'}
+    return {'live':{key:live.get(key) for key in ('date','updatedAt','revision','structureRevision','frozen','sources','mode','offlineReady','sourceKinds')} if live else None,'brokenStocks':live_broken,'relimitLinks':relimit_links,'relimitContextStocks':list(relimit_context.values()),'relimitBrokenStocks':list(relimit_broken.values()),'sealedStocks':visible,'contextStocks':context,'suspendedStocks':[],'suspensionCarry':suspension_carry,'unpromotedStocks':unpromoted,'date':end_date,'dates':dates,'previousDates':previous_dates,'nodes':nodes,'links':links,'themes':[{'name':name} for name in themes],'firstCounts':first_counts,'source':'kpl_performance_board_pattern+verified_actual_limitup_paths'}
 
 
 def ladder_stock_facts(date,code):
@@ -2194,11 +2279,11 @@ class Handler(SimpleHTTPRequestHandler):
             self.wfile.write(frame.encode());self.wfile.flush()
         try:
             self.wfile.write(b'retry: 3000\n\n');self.wfile.flush()
-            send('ready',{'status':live_market_status(),'resync':True,'transport':'sse'})
+            send('ready',{'status':live_market_status(),'resync':True,'transport':'sse','ladderStatus':{key:value for key,value in live_ladder_snapshot().items() if key in ('date','available','mode','offlineReady','revision','structureRevision','updatedAt')}})
             while True:
                 try:event=mailbox.get(timeout=15)
                 except queue.Empty:
-                    send('heartbeat',{'status':live_market_status(),'health':PUSH_HUB.status()});continue
+                    send('heartbeat',{'status':live_market_status(),'health':PUSH_HUB.status(),'ladderStatus':{key:value for key,value in live_ladder_snapshot().items() if key in ('date','available','mode','offlineReady','revision','structureRevision','updatedAt')}});continue
                 send('market',event,event['id'])
         except (BrokenPipeError,ConnectionResetError,TimeoutError,OSError):pass
         finally:PUSH_HUB.unsubscribe(token);self.close_connection=True
@@ -2210,7 +2295,7 @@ class Handler(SimpleHTTPRequestHandler):
             if u.path=='/api/live-push-status':return self.send_json(PUSH_HUB.status())
             if u.path=="/api/ladder-live-status":
                 live=live_ladder_snapshot()
-                return self.send_json({key:live.get(key) for key in ('date','available','updatedAt','revision','structureRevision','frozen','sources','status','reason')})
+                return self.send_json({key:live.get(key) for key in ('date','available','updatedAt','revision','structureRevision','frozen','sources','status','reason','mode','offlineReady','sourceKinds')})
             if u.path=="/api/ladder-version":
                 return self.send_json(ladder_data_version())
             if u.path=="/api/index-version":
@@ -2232,7 +2317,8 @@ class Handler(SimpleHTTPRequestHandler):
                 except Exception:
                     return self.send_json({"error":"实时数据暂不可用，请稍后重试"},503)
             if u.path=="/api/dates":
-                return self.send_json({"dates":market_data_dates()})
+                live=live_ladder_snapshot()
+                return self.send_json({"dates":market_data_dates(),"onlineLadderDate":live['date'] if live.get('available') else None})
             if u.path=="/api/topic-dates":
                 topic=(q.get("topic",[""])[0] or "").strip()
                 if not topic: return self.send_json({"error":"topic is required"},400)
@@ -2323,7 +2409,7 @@ class Handler(SimpleHTTPRequestHandler):
                 if not 1<=sessions<=30:raise ValueError("天梯窗口支持1至30个交易日")
                 meta=ladder_data_version();live=live_ladder_snapshot()
                 if date==live['date'] and live.get('available'):
-                    key=f"limitup-ladder-live:v5:{date}:{sessions}:{live['revision']}:{meta['ladderDataVersion']}"
+                    key=f"limitup-ladder-live:v7:{date}:{sessions}:{live['revision']}:{meta['ladderDataVersion']}"
                     payload=cached_series(key,lambda:{**limitup_ladder_data(date,sessions,live),**meta,'cacheTtlSeconds':10},10)
                     return self.send_json(payload)
                 key=f"limitup-ladder:v16:{date}:{sessions}:{meta['ladderDataVersion']}"
