@@ -746,3 +746,5 @@ body:has(.ladder-vertical) .topbar{display:none}.content:has(.ladder-vertical){p
 /* Daily free-float turnover is already a percentage in daily_basic. */
 .vl-hover-turnover-col{width:68px}.vl-hover-turnover{white-space:nowrap}
 @media(max-width:600px){.vl-hover-turnover-col{width:62px}}
+
+.vl-live-status{font:9px var(--mono);color:var(--green);white-space:nowrap}.vl-live-pct{font:7px var(--mono);fill:var(--muted)}.vl-live-pct.vl-live-up{fill:#cf4e49}.vl-live-pct.vl-live-down{fill:#278a67}
