@@ -905,7 +905,7 @@ def compact(df,datecol):
             else: ts=int(datetime.datetime.fromisoformat(str(dt).replace("Z","+00:00")).timestamp()*1000)
         except Exception: continue
         item={"timestamp":ts}
-        for key in ("open","high","low","close","vol","volume","amount","pct_chg"):
+        for key in ("open","high","low","close","vol","volume","amount","pct_chg","pre_close","turnover_rate_f"):
             if key in cols:
                 v=json_clean(r.get(key))
                 if v is not None:
@@ -952,8 +952,9 @@ def stock_series_latest(code, cutoff):
     import pandas as pd
     with sqlite3.connect(f"file:{BASIC_DB}?mode=ro",uri=True,timeout=5) as conn:
         daily=pd.read_sql_query(
-            "SELECT trade_date,open,high,low,close,vol,amount FROM tbl_cn_day "
-            "WHERE ts_code=? AND trade_date<=? ORDER BY trade_date",conn,params=(code,cutoff))
+            "SELECT d.trade_date,d.open,d.high,d.low,d.close,d.vol,d.amount,d.pre_close,d.pct_chg,b.turnover_rate_f "
+            "FROM tbl_cn_day d LEFT JOIN tbl_cn_daily_basic b ON b.ts_code=d.ts_code AND b.trade_date=d.trade_date "
+            "WHERE d.ts_code=? AND d.trade_date<=? ORDER BY d.trade_date",conn,params=(code,cutoff))
         if daily.empty: return {"daily":[],"weekly":[],"monthly":[],"latestDate":None,
                                 "adjustmentBase":1.0,"adjustmentFactors":[]}
         last_day=str(daily["trade_date"].iloc[-1])
@@ -971,7 +972,7 @@ def stock_series_latest(code, cutoff):
             adjustment_factors=[[str(day),float(value)] for day,value in factors[["trade_date","adj_factor"]].itertuples(index=False,name=None)]
             factor_by_day=factors.set_index("trade_date")["adj_factor"]
             scale=daily["trade_date"].map(factor_by_day).ffill().fillna(1.0)/base
-            for field in ("open","high","low","close"):
+            for field in ("open","high","low","close","pre_close"):
                 daily[field]=pd.to_numeric(daily[field],errors="coerce")*scale
             daily["vol"]=pd.to_numeric(daily["vol"],errors="coerce")/scale
     return {"daily":compact(daily,"trade_date"),"weekly":aggregate_stock_daily(daily,"W-FRI"),
@@ -1512,7 +1513,7 @@ def live_stock_chart(code,day):
             except Exception:quote={}
         if not quote_valid(quote):quote={}
         date=datetime.datetime.strptime(day,'%Y%m%d').date();prior=(date-datetime.timedelta(days=1)).strftime('%Y%m%d')
-        basis=cached_series(f'live-hover-basis:v1:{code}:{prior}:{revision}',lambda:stock_series_latest(code,prior),300)
+        basis=cached_series(f'live-hover-basis:v2:{code}:{prior}:{revision}',lambda:stock_series_latest(code,prior),300)
         history=stock_series_for_date(basis,prior)
         start=(date-datetime.timedelta(days=14)).strftime('%Y%m%d')
         old_one=cached_series(f'live-hover-minute-history:v1:{code}:{prior}:{revision}',lambda:adjusted_one_min_payload(intraday_with_suspensions(code,start,prior),basis),300)
@@ -1538,7 +1539,7 @@ def live_stock_chart(code,day):
         facts={'code':code,'date':day,'close':close,'pct':pct,'openPct':(opening/float(prior_close)-1)*100 if prior_close else None,'amplitude':(high-low)/float(prior_close)*100 if prior_close else None,'amount':amount,'floatMarketCap':None,'totalMarketCap':None,'freeFloatTurnover':None,'limitTime':None}
         live=live_ladder_snapshot();facts['limitTime']=live.get('stocks',{}).get(code,{}).get('time')
         return {'code':code,'date':day,'isLive':True,'updatedAt':now.isoformat(),'daily':daily,'oneMin':bars,'fifteenMin':historical_fifteen+current_fifteen,'suspendedDays':old_one['suspendedDays'],'previewFacts':facts,'sources':{'oneMin':'tdx_native_1min','fifteenMin':'tdx_native_15min','daily':'live_quote+native_minute'},'liveCoverage':{'oneMinBars':len(current_one),'fifteenMinBars':len(current_fifteen)}}
-    return cached_series(f'live-stock-hover:v3:{code}:{day}:{revision}',load,6)
+    return cached_series(f'live-stock-hover:v4:{code}:{day}:{revision}',load,6)
 
 
 def live_ladder_snapshot():
@@ -2534,7 +2535,7 @@ class Handler(SimpleHTTPRequestHandler):
                 ttl=300 if latest else 7*24*3600
                 latest_day=datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=8))).date()
                 latest_end=latest_day.strftime("%Y%m%d")
-                latest_basis=cached_series(f"series:v8:{code}:day-week-month:latest-basis:{latest_end}",lambda:stock_series_latest(code,latest_end),300)
+                latest_basis=cached_series(f"series:v9:{code}:day-week-month:latest-basis:{latest_end}",lambda:stock_series_latest(code,latest_end),300)
                 basis_tag=f"{latest_end}:{latest_basis['adjustmentBase']}"
                 one_key=f"series:v7:{code}:minute:5d:qfq:{basis_tag}:{freshness}{date}"
                 fifteen_key=f"series:v6:{code}:fifteen-minute:3m:qfq:{basis_tag}:{freshness}{date}"
@@ -2579,7 +2580,7 @@ class Handler(SimpleHTTPRequestHandler):
                 result["previousLimitUpTradingDays"]=limitup_info["days"]
                 result["previousLimitUpHistoricalFirst"]=limitup_info["historicalFirst"]
                 result["limitUpSpanVersion"]=4
-                result["chartSeriesVersion"]=5
+                result["chartSeriesVersion"]=6
                 return self.send_json(result)
             if u.path.startswith("/api/"):
                 self.send_error(404)
