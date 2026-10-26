@@ -1405,7 +1405,7 @@ def ladder_board_pattern(raw,consecutive):
 
 
 def ladder_data_version():
-    return {"ladderDataVersion":database_revision((KPL_DB,BASIC_DB)),"ladderSeriesVersion":13,"cacheBackend":CACHE.backend}
+    return {"ladderDataVersion":database_revision((KPL_DB,BASIC_DB)),"ladderSeriesVersion":15,"cacheBackend":CACHE.backend}
 
 
 def live_ladder_index_quotes(day):
@@ -1596,7 +1596,7 @@ def limitup_ladder_data(end_date,sessions=5,live=None):
     pools={day:{} for day in pool_days}
     with closing(sqlite3.connect(f'file:{KPL_DB}?mode=ro',uri=True,timeout=4)) as c:
         c.row_factory=sqlite3.Row
-        for row in c.execute(f'SELECT trade_date,ts_code,name,theme,lu_time,close_price,board_period FROM tbl_cn_kpl_limit_performance WHERE trade_date IN ({marks})',pool_days):
+        for row in c.execute(f'SELECT trade_date,ts_code,name,theme,lu_time,close_price,board_period,pct_chg FROM tbl_cn_kpl_limit_performance WHERE trade_date IN ({marks})',pool_days):
             item=dict(row);item['theme']=str(item['theme'] or '').strip() or '暂无题材';pools[item['trade_date']][item['ts_code']]=item
         for row in c.execute(f"SELECT trade_date,ts_code,name,lu_time FROM tbl_cn_kpl_list WHERE trade_date IN ({marks}) AND tag='涨停'",pool_days):
             item=dict(row);pools[item['trade_date']].setdefault(item['ts_code'],{**item,'theme':'暂无题材','close_price':None,'board_period':''})
@@ -1661,14 +1661,15 @@ def limitup_ladder_data(end_date,sessions=5,live=None):
     meta={};seal_facts={}
     with closing(sqlite3.connect(f'file:{KPL_DB}?mode=ro',uri=True,timeout=4)) as c:
         c.row_factory=sqlite3.Row
-        for row in c.execute(f'''SELECT trade_date,ts_code,name,theme,lu_time,close_price,board_period FROM tbl_cn_kpl_limit_performance WHERE trade_date BETWEEN ? AND ? AND ts_code IN ({code_marks})''',[earliest,end_date,*codes]):
+        for row in c.execute(f'''SELECT trade_date,ts_code,name,theme,lu_time,close_price,board_period,pct_chg FROM tbl_cn_kpl_limit_performance WHERE trade_date BETWEEN ? AND ? AND ts_code IN ({code_marks})''',[earliest,end_date,*codes]):
             item=dict(row);item['theme']=str(item['theme'] or '').strip() or '暂无题材';meta[(item['trade_date'],item['ts_code'])]=item
         # Reuse the same final-seal/opening facts and trait classifier as stock/topic pages.
-        for row in c.execute(f'''SELECT trade_date,ts_code,last_time,open_times FROM tbl_cn_limit_list WHERE trade_date BETWEEN ? AND ? AND ts_code IN ({code_marks}) AND "limit"='U' ''',[earliest,end_date,*codes]):
-            item=dict(row);seal_facts[(item['trade_date'],item['ts_code'])]={'last_time':item['last_time'],'open_times':item['open_times']}
-        for row in c.execute(f'''SELECT trade_date,ts_code,last_time FROM tbl_cn_kpl_list WHERE trade_date BETWEEN ? AND ? AND ts_code IN ({code_marks}) AND tag='涨停' ''',[earliest,end_date,*codes]):
+        for row in c.execute(f'''SELECT trade_date,ts_code,last_time,open_times,pct_chg FROM tbl_cn_limit_list WHERE trade_date BETWEEN ? AND ? AND ts_code IN ({code_marks}) AND "limit"='U' ''',[earliest,end_date,*codes]):
+            item=dict(row);seal_facts[(item['trade_date'],item['ts_code'])]={'last_time':item['last_time'],'open_times':item['open_times'],'limit_pct_chg':item['pct_chg']}
+        for row in c.execute(f'''SELECT trade_date,ts_code,last_time,pct_chg FROM tbl_cn_kpl_list WHERE trade_date BETWEEN ? AND ? AND ts_code IN ({code_marks}) AND tag='涨停' ''',[earliest,end_date,*codes]):
             item=dict(row);facts=seal_facts.setdefault((item['trade_date'],item['ts_code']),{})
             if not facts.get('last_time'):facts['last_time']=item['last_time']
+            facts['kpl_pct_chg']=item['pct_chg']
     if live:
         for code,item in live['pool'].items():meta[(live['date'],code)]=item
     def clock(raw):
@@ -1691,7 +1692,13 @@ def limitup_ladder_data(end_date,sessions=5,live=None):
             elif same(facts.get('daily_open')) and same(high) and same(facts.get('daily_close')) and not same(low):facts['board_shape']='t_shape'
         except (KeyError,TypeError,ValueError):pass
         traits=classify_limitup_traits(facts)
-        return {'id':day+':'+code,'date':day,'code':code,'name':item.get('name') or names.get(code,code),'theme':str(item.get('theme') or '').strip() or '暂无题材','board':board,'consecutiveBoard':max(1,int(consecutive or 1)),'patternDays':span,'boardPeriod':label,'board_shape':facts.get('board_shape'),'board_strength':traits['board_strength'],'last_time':facts.get('last_time'),'open_times':facts.get('open_times'),'status':'sealed','time':clock(item.get('lu_time')),'representative':False,'firstCount':0,'members':[]}
+        pct=None;pct_source=None
+        for source,value in [('kpl_performance',item.get('pct_chg')),('kpl_list',facts.get('kpl_pct_chg')),('limit_list',facts.get('limit_pct_chg')),('daily',facts.get('pct_chg'))]:
+            try:
+                candidate=float(str(value).strip().rstrip('%'))
+                if math.isfinite(candidate):pct=candidate;pct_source=source;break
+            except (TypeError,ValueError):pass
+        return {'id':day+':'+code,'date':day,'code':code,'name':item.get('name') or names.get(code,code),'theme':str(item.get('theme') or '').strip() or '暂无题材','board':board,'consecutiveBoard':max(1,int(consecutive or 1)),'patternDays':span,'boardPeriod':label,'board_shape':facts.get('board_shape'),'board_strength':traits['board_strength'],'last_time':facts.get('last_time'),'open_times':facts.get('open_times'),'status':'sealed','pct':pct,'pctSource':pct_source,'time':clock(item.get('lu_time')),'representative':False,'firstCount':0,'members':[]}
     # A daily-only sealed row is not a ladder event when all three market
     # sources omit it. Such invisible rows used to consume the predecessor of
     # a reported multi-session pattern and leave its visible nodes disconnected.
@@ -1845,7 +1852,7 @@ def limitup_ladder_data(end_date,sessions=5,live=None):
         for code,item in live['failed'].items():
             if code not in prior_failed:live_broken.append({'id':day+':'+code+':broken','date':day,'code':code,'name':item['name'],'theme':item['theme'],'originalTheme':item['theme'],'status':'broken','board':0,'pct':item['pct'],'time':clock(item['lu_time']),'isLive':True})
         for stock in visible+context+nodes+unpromoted+live_broken:
-            if stock['date']==day:stock.update(isLive=True,pct=live['rows'].get(stock['code'],{}).get('pct_chg'))
+            if stock['date']==day:stock.update(isLive=True,pct=live['rows'].get(stock['code'],{}).get('pct_chg'),pctSource='live_quote')
     return {'live':{key:live[key] for key in ('date','updatedAt','revision','sources')} if live else None,'brokenStocks':live_broken,'relimitLinks':relimit_links,'relimitContextStocks':list(relimit_context.values()),'relimitBrokenStocks':list(relimit_broken.values()),'sealedStocks':visible,'contextStocks':context,'suspendedStocks':[],'suspensionCarry':suspension_carry,'unpromotedStocks':unpromoted,'date':end_date,'dates':dates,'previousDates':previous_dates,'nodes':nodes,'links':links,'themes':[{'name':name} for name in themes],'firstCounts':first_counts,'source':'kpl_performance_board_pattern+verified_actual_limitup_paths'}
 
 
@@ -2234,10 +2241,10 @@ class Handler(SimpleHTTPRequestHandler):
                 if not 1<=sessions<=30:raise ValueError("天梯窗口支持1至30个交易日")
                 meta=ladder_data_version();live=live_ladder_snapshot()
                 if date==live['date'] and live.get('available'):
-                    key=f"limitup-ladder-live:v2:{date}:{sessions}:{live['revision']}:{meta['ladderDataVersion']}"
+                    key=f"limitup-ladder-live:v4:{date}:{sessions}:{live['revision']}:{meta['ladderDataVersion']}"
                     payload=cached_series(key,lambda:{**limitup_ladder_data(date,sessions,live),**meta,'cacheTtlSeconds':10},10)
                     return self.send_json(payload)
-                key=f"limitup-ladder:v14:{date}:{sessions}:{meta['ladderDataVersion']}"
+                key=f"limitup-ladder:v16:{date}:{sessions}:{meta['ladderDataVersion']}"
                 today=datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=8))).strftime("%Y%m%d")
                 ttl=300 if date>=today else 24*3600
                 payload=CACHE.get(key);hit=payload is not None
