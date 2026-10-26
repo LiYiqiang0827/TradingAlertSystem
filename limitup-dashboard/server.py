@@ -5,7 +5,7 @@ import copy, json, os, re, sqlite3, sys, datetime, traceback, calendar, bisect, 
 from functools import lru_cache
 from collections import OrderedDict
 import time
-from contextlib import closing
+from contextlib import closing, ExitStack
 from cache_singleflight import KeyedLocks
 from http.server import ThreadingHTTPServer, SimpleHTTPRequestHandler
 from decimal import Decimal, InvalidOperation
@@ -1361,9 +1361,10 @@ def full_day_suspensions(code, start_date, end_date):
     finally:
         conn.close()
 
-def intraday_with_suspensions(code, start_date, end_date):
+def intraday_with_suspensions(code, start_date, end_date, *, frame=None):
     """Return five recent one-minute sessions, filling full-day suspensions at prior close."""
-    frame=get_oneMin(ts_code=code,start_date=start_date,end_date=end_date)
+    if frame is None:
+        frame=get_oneMin(ts_code=code,start_date=start_date,end_date=end_date)
     if frame is None:
         return {"bars":[],"days":[],"suspendedDays":[]}
     frame=filter_after_close(frame)
@@ -1437,6 +1438,57 @@ def cached_series(key, loader, ttl=7*24*3600):
 
 
 
+
+
+def cached_intraday_windows(code, period, windows, basis):
+    """Read missing selected/latest windows once per period, then slice locally.
+
+    Keys retain the preview cache contract. Lock in sorted order so simultaneous
+    full-page/preview requests share loads without nested lock-order cycles.
+    Failed fifteen-minute reads are never cached as successful empty data.
+    """
+    keys=sorted(windows)
+    values=dict(zip(keys,CACHE.get_many(keys)))
+    missing=[key for key in keys if values[key] is None]
+    errors={}
+    with ExitStack() as locks:
+        for key in missing:
+            locks.enter_context(_cache_load_locks.hold(key))
+        if missing:
+            values.update(zip(missing,CACHE.get_many(missing)))
+        missing=[key for key in missing if values[key] is None]
+        if missing:
+            try:
+                ranges=[windows[key][:2] for key in missing]
+                reader=get_oneMin if period=="oneMin" else get_fifteenMin
+                frame=reader(ts_code=code,date_ranges=ranges)
+                # Storage returns normalized YYYYMMDD trade_date values. A union
+                # query keeps distant review/latest windows from reading the gap.
+                days=frame["trade_date"].astype(str).str.replace("-","",regex=False)
+                converted={}
+                for key in missing:
+                    start,end,ttl=windows[key]
+                    identity=(start,end)
+                    if identity not in converted:
+                        native=frame.loc[days.between(start,end)].copy()
+                        if period=="oneMin":
+                            data=adjusted_one_min_payload(intraday_with_suspensions(code,start,end,frame=native),basis)
+                        else:
+                            native=drop_full_day_suspended_bars(filter_after_close(native),code,start,end)
+                            data={"bars":adjusted_stock_intraday_bars(compact(native,"datetime"),basis),
+                                  "days":sorted(native["datetime"].astype(str).str[:10].unique()) if not native.empty else []}
+                        converted[identity]=data
+                    values[key]=converted[identity]
+                    CACHE.set(key,values[key],ttl)
+            except Exception as exc:
+                if period=="oneMin":
+                    raise
+                for key in missing:
+                    if values[key] is None:
+                        values[key]={"bars":[],"days":[]}
+                        errors[key]=str(exc)
+                print("15-minute data unavailable:",str(exc),flush=True)
+    return values,errors
 
 
 def market_stats(date,topics,pool=None):
@@ -2760,37 +2812,24 @@ class Handler(SimpleHTTPRequestHandler):
                     fifteen_key=f"series:v6:{code}:fifteen-minute:3m:qfq:{basis_tag}:{freshness}{date}"
                     review_series=stock_series_for_date(latest_basis,date)
                     daily=review_series["daily"]; weekly=review_series["weekly"]; monthly=review_series["monthly"]
-                    def load_one():
-                        return adjusted_one_min_payload(intraday_with_suspensions(code,start_1m,date),latest_basis)
-                    one_data=cached_series(one_key,load_one,ttl)
-                    def load_fifteen():
-                        native=get_fifteenMin(ts_code=code,start_date=start_15m,end_date=date)
-                        native=filter_after_close(native)
-                        native=drop_full_day_suspended_bars(native,code,start_15m,date)
-                        bars=adjusted_stock_intraday_bars(compact(native,"datetime"),latest_basis)
-                        days=sorted(native["datetime"].astype(str).str[:10].unique()) if not native.empty else []
-                        return {"bars":bars,"days":days}
-                    fifteen_error=None
-                    try: fifteen_data=cached_series(fifteen_key,load_fifteen,ttl)
-                    except Exception as exc:
-                        fifteen_error=str(exc); print("15-minute historical data unavailable:",fifteen_error,flush=True); fifteen_data={"bars":[],"days":[]}
-                    latest_end=latest_day.strftime("%Y%m%d"); latest_start_1m=(latest_day-datetime.timedelta(days=14)).strftime("%Y%m%d"); latest_start_15m=shift_months(latest_day,3).strftime("%Y%m%d")
-                    latest_ttl=300
+                    latest_start_1m=(latest_day-datetime.timedelta(days=14)).strftime("%Y%m%d")
+                    latest_start_15m=shift_months(latest_day,3).strftime("%Y%m%d")
+                    latest_one_key=f"series:v7:{code}:minute:5d:qfq:latest:{basis_tag}"
+                    latest_fifteen_key=f"series:v6:{code}:fifteen-minute:3m:qfq:latest:{basis_tag}"
+                    one_windows,_=cached_intraday_windows(code,"oneMin",{
+                        one_key:(start_1m,date,ttl),
+                        latest_one_key:(latest_start_1m,latest_end,300),
+                    },latest_basis)
+                    fifteen_windows,fifteen_errors=cached_intraday_windows(code,"fifteenMin",{
+                        fifteen_key:(start_15m,date,ttl),
+                        latest_fifteen_key:(latest_start_15m,latest_end,300),
+                    },latest_basis)
+                    one_data=one_windows[one_key]; latest_one=one_windows[latest_one_key]
+                    fifteen_data=fifteen_windows[fifteen_key]; latest_fifteen=fifteen_windows[latest_fifteen_key]
+                    fifteen_error=fifteen_errors.get(fifteen_key)
+                    latest_fifteen_error=fifteen_errors.get(latest_fifteen_key)
                     latest_series_data=stock_series_for_date(latest_basis,latest_end)
                     latest_daily=latest_series_data["daily"]; latest_weekly=latest_series_data["weekly"]; latest_monthly=latest_series_data["monthly"]
-                    def load_latest_one():
-                        return adjusted_one_min_payload(intraday_with_suspensions(code,latest_start_1m,latest_end),latest_basis)
-                    latest_one=cached_series(f"series:v7:{code}:minute:5d:qfq:latest:{basis_tag}",load_latest_one,latest_ttl)
-                    def load_latest_fifteen():
-                        native=filter_after_close(get_fifteenMin(ts_code=code,start_date=latest_start_15m,end_date=latest_end))
-                        native=drop_full_day_suspended_bars(native,code,latest_start_15m,latest_end)
-                        bars=adjusted_stock_intraday_bars(compact(native,"datetime"),latest_basis); days=sorted(native["datetime"].astype(str).str[:10].unique()) if not native.empty else []
-                        return {"bars":bars,"days":days}
-                    latest_fifteen_error=None
-                    try: latest_fifteen=cached_series(f"series:v6:{code}:fifteen-minute:3m:qfq:latest:{basis_tag}",load_latest_fifteen,latest_ttl)
-                    except Exception as exc:
-                        latest_fifteen_error=str(exc); print("15-minute latest data unavailable:",latest_fifteen_error,flush=True)
-                        latest_fifteen={"bars":fifteen_data["bars"],"days":fifteen_data["days"]}
                     latest_actual_date=latest_basis["latestDate"] or latest_end
                     latest_series={"daily":latest_daily,"weekly":latest_weekly,"monthly":latest_monthly,"oneMin":latest_one["bars"],"fifteenMin":latest_fifteen["bars"],"suspendedDays":latest_one["suspendedDays"],"latestDate":latest_actual_date,"coverage":{"oneMinSuspendedDays":len(latest_one["suspendedDays"]),"oneMinDays":len(latest_one["days"]),"oneMinBars":len(latest_one["bars"]),"oneMinStart":latest_one["days"][0] if latest_one["days"] else None,"oneMinEnd":latest_one["days"][-1] if latest_one["days"] else None,"fifteenDays":len(latest_fifteen["days"]),"fifteenBars":len(latest_fifteen["bars"]),"fifteenStart":latest_fifteen["days"][0] if latest_fifteen["days"] else None,"fifteenEnd":latest_fifteen["days"][-1] if latest_fifteen["days"] else None,"fifteenError":latest_fifteen_error}}
                     latest_date=latest_actual_date
