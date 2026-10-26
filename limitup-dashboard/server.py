@@ -433,6 +433,7 @@ def stock_data_version():
            DBROOT/'offline'/'oneMinute'/'catalog.duckdb',DBROOT/'offline'/'oneMinute'/'catalog.duckdb.wal',
            DBROOT/'offline'/'fifteenMinute'/'fifteen_min.duckdb',DBROOT/'offline'/'fifteenMinute'/'fifteen_min.duckdb.wal')
     return {'stockDataVersion':database_revision(paths),'stockFactsVersion':database_revision((BASIC_DB,KPL_DB)),
+            'dailyDataVersion':database_revision((BASIC_DB,)),
             'chartSeriesVersion':7,'stockVersionAt':datetime.datetime.now(datetime.timezone.utc).timestamp()}
 
 
@@ -991,7 +992,7 @@ def aggregate_stock_daily(frame, period):
         rows.append(row)
     return compact(pd.DataFrame(rows),"trade_date")
 
-def stock_series_latest(code, cutoff):
+def _load_stock_daily_basis(code, cutoff):
     """Build one shared set of daily and period bars on the latest adjustment basis."""
     import pandas as pd
     with sqlite3.connect(f"file:{BASIC_DB}?mode=ro",uri=True,timeout=5) as conn:
@@ -1019,19 +1020,221 @@ def stock_series_latest(code, cutoff):
             for field in ("open","high","low","close","pre_close"):
                 daily[field]=pd.to_numeric(daily[field],errors="coerce")*scale
             daily["vol"]=pd.to_numeric(daily["vol"],errors="coerce")/scale
-    return {"daily":compact(daily,"trade_date"),"weekly":aggregate_stock_daily(daily,"W-FRI"),
-            "monthly":aggregate_stock_daily(daily,"M"),"latestDate":last_day,
+    return {"daily":compact(daily,"trade_date"),"latestDate":last_day,
             "adjustmentBase":adjustment_base,"adjustmentFactors":adjustment_factors}
+
+# Daily bases depend only on daily/fundamental/adjustment source data, not minute files.
+_daily_preload_pool = None
+_daily_hot_lock = threading.RLock()
+_daily_hot = OrderedDict()
+_daily_warm_status = {'running':False, 'warmed':0, 'errors':0}
+
+
+def register_daily_hot(code):
+    now=time.time()
+    with _daily_hot_lock:
+        _daily_hot.pop(code,None);_daily_hot[code]=now
+        while len(_daily_hot)>120:_daily_hot.popitem(last=False)
+    if CACHE.redis:
+        pipe=CACHE.redis.pipeline(transaction=False)
+        pipe.zadd('stock-daily-hot:v1',{code:now})
+        pipe.zremrangebyscore('stock-daily-hot:v1','-inf',now-7*86400)
+        pipe.zremrangebyrank('stock-daily-hot:v1',0,-121)
+        pipe.expire('stock-daily-hot:v1',7*86400);pipe.execute()
+
+
+def stock_series_latest(code,cutoff,register=True):
+    from daily_basis_cache import read_basis
+    if register:register_daily_hot(code)
+    return read_basis(CACHE,code,cutoff,lambda:database_revision((BASIC_DB,)),_load_stock_daily_basis)
+
+
+def stock_daily_payload(code,date):
+    today=live_market_status()['date'];basis=stock_series_latest(code,today)
+    end=datetime.datetime.strptime(date,'%Y%m%d').date();start=end-datetime.timedelta(days=2*366)
+    bars=[bar for bar in basis['daily'] if start<=datetime.datetime.fromtimestamp(bar['timestamp']/1000,datetime.timezone.utc).date()<=end]
+    return {'code':code,'date':date,'daily':bars,'dailyDataVersion':basis['dailyDataVersion'],
+            'latestDate':basis['latestDate'],'seriesReferenceDate':today,'preloadVersion':1}
+
+
+def stock_preview(code,date):
+    """The hover needs three series, not the full page's additional latest/week/month sets."""
+    version=stock_data_version()
+    def load():
+        end=datetime.datetime.strptime(date,'%Y%m%d').date();today=live_market_status()['date']
+        basis=stock_series_latest(code,today);basis_tag=f"{today}:{basis['adjustmentBase']}:{version['stockDataVersion']}"
+        start=(end-datetime.timedelta(days=14)).strftime('%Y%m%d')
+        one=cached_series(f'series:v7:{code}:minute:5d:qfq:{basis_tag}:{date}',lambda:adjusted_one_min_payload(intraday_with_suspensions(code,start,date),basis))
+        def load_fifteen():
+            first=shift_months(end,3).strftime('%Y%m%d')
+            frame=drop_full_day_suspended_bars(filter_after_close(get_fifteenMin(ts_code=code,start_date=first,end_date=date)),code,first,date)
+            days=sorted(frame['datetime'].astype(str).str[:10].unique()) if not frame.empty else []
+            return {'bars':adjusted_stock_intraday_bars(compact(frame,'datetime'),basis),'days':days}
+        fifteen=cached_series(f'series:v6:{code}:fifteen-minute:3m:qfq:{basis_tag}:{date}',load_fifteen)
+        daily=stock_daily_payload(code,date)
+        if stock_data_version()['stockDataVersion']!=version['stockDataVersion']:raise RuntimeError('Chart source changing; temporarily unavailable')
+        return {**daily,'oneMin':one['bars'],'fifteenMin':fifteen['bars'],'suspendedDays':one['suspendedDays'],
+                'coverage':{'oneMinBars':len(one['bars']),'fifteenBars':len(fifteen['bars']),'fifteenError':None},
+                'previewVersion':1,'chartSeriesVersion':7}
+    payload,hit=cached_stock_response('stock-preview:v1:'+code+':'+date+':'+version['stockDataVersion'],load)
+    return {**payload,**version},hit
+
+
+def start_daily_warmer():
+    """Warm recently visited stocks after daily DB updates settle; no browser needs to stay open."""
+    from concurrent.futures import ThreadPoolExecutor
+    global _daily_preload_pool
+    _daily_preload_pool=ThreadPoolExecutor(max_workers=2,thread_name_prefix='daily-preload')
+    def run():
+        last=None;candidate=None
+        while True:
+            try:
+                revision=database_revision((BASIC_DB,))
+                if revision!=candidate:candidate=revision
+                elif revision!=last:
+                    with _daily_hot_lock:codes=list(_daily_hot)[-48:]
+                    if CACHE.redis:codes=list(dict.fromkeys(codes+CACHE.redis.zrevrangebyscore('stock-daily-hot:v1','+inf',time.time()-7*86400,start=0,num=48)))[:48]
+                    cutoff=live_market_status()['date'];_daily_warm_status.update(running=True,warmed=0,errors=0)
+                    # The same bounded pool also serves browser preload requests.
+                    for code in codes:
+                        future=_daily_preload_pool.submit(stock_series_latest,code,cutoff,False)
+                        try:future.result();_daily_warm_status['warmed']+=1
+                        except Exception:_daily_warm_status['errors']+=1
+                    _daily_warm_status.update(running=False,sourceRevision=revision,finishedAt=time.time())
+                    last=revision
+            except Exception as exc:
+                _daily_warm_status.update(running=False,lastError=type(exc).__name__)
+            time.sleep(20)
+    threading.Thread(target=run,name='daily-cache-warmer',daemon=True).start()
+
+
+_online_batch_lru=OrderedDict()
+_online_batch_lock=threading.RLock()
+_online_batch_load_locks=tuple(threading.RLock() for _ in range(8))
+
+
+def _online_batch_token(kind,day,client):
+    last=client.zrevrange('online:'+kind+':timeline',0,0,withscores=True)
+    count,stamp=client.hmget('online:meta',kind+'_last_count',kind+'_last_ts')
+    # Source metadata changes on every committed batch. File revision covers the
+    # durable fallback after Redis history expires or an offline catch-up writes it.
+    database=DBROOT/'online'/('online_data_'+day[:6]+'.db')
+    token=hashlib.sha256(repr((last,count,stamp,database_revision((database,)))).encode()).hexdigest()[:16]
+    return token
+
+
+def read_online_close(kind,day,client=None):
+    import redis
+    client=client or redis.Redis(host='127.0.0.1',port=6380,decode_responses=True,socket_connect_timeout=.5,socket_timeout=2)
+    try:token=_online_batch_token(kind,day,client)
+    except redis.RedisError:token='sqlite-'+database_revision((DBROOT/'online'/('online_data_'+day[:6]+'.db'),))
+    key=f'online-close-batch:v1:{kind}:{day}:{token}'
+    phase=live_market_status()['phase'];ttl=3 if phase=='trading' else 60 if phase=='recess' else 1800
+    with _online_batch_load_locks[hash(kind)%len(_online_batch_load_locks)]:
+        with _online_batch_lock:
+            item=_online_batch_lru.get(key)
+            if item and item[0]>time.monotonic():_online_batch_lru.move_to_end(key);return item[1]
+        storage_key=f'online-close-batch:v2:{kind}:{day}'
+        record=CACHE.get(storage_key)
+        payload=record['payload'] if record and record.get('token')==token else None
+        if payload is None:
+            payload=_read_online_close_uncached(kind,day,client)
+            if payload[2]!='unavailable':CACHE.set(storage_key,{'token':token,'payload':payload},ttl)
+        if payload[2]!='unavailable':
+            size=len(json.dumps(payload,ensure_ascii=False,separators=(',',':')).encode())*3
+            if size<=32*1024*1024:
+                with _online_batch_lock:
+                    _online_batch_lru[key]=(time.monotonic()+ttl,payload,size)
+                    while len(_online_batch_lru)>12 or sum(item[2] for item in _online_batch_lru.values())>48*1024*1024:_online_batch_lru.popitem(last=False)
+        return payload
+
+
+def online_stock_observations(code,day):
+    """HGET the requested stock when source archives exist, otherwise share frozen batches."""
+    import redis
+    client=redis.Redis(host='127.0.0.1',port=6380,decode_responses=True,socket_connect_timeout=.5,socket_timeout=2)
+    kinds=('snapshot','limitperformance','zt');pipe=client.pipeline(transaction=False)
+    for kind in kinds:pipe.zrevrange('online:'+kind+':timeline',0,0,withscores=True)
+    try:
+        latest=pipe.execute();pipe=client.pipeline(transaction=False)
+        for records in latest:
+            key=records[0][0] if records else '__missing_archive__'
+            pipe.hget(key,code);pipe.exists(key)
+        raw=pipe.execute()
+    except redis.RedisError:
+        fallback={}
+        for kind in kinds:
+            rows,at,source=read_online_close(kind,day,client);fallback[kind]=(rows.get(code,{}),at,source)
+        return fallback
+    result={};zone=datetime.timezone(datetime.timedelta(hours=8))
+    for index,kind in enumerate(kinds):
+        records=latest[index];stamp=online_stamp(records[0][1]) if records else 0
+        same=stamp and datetime.datetime.fromtimestamp(stamp,zone).strftime('%Y%m%d')==day
+        if same and raw[index*2+1]:result[kind]=(json.loads(raw[index*2]) if raw[index*2] else {},stamp,'redis-stock')
+        else:
+            rows,at,source=read_online_close(kind,day,client);result[kind]=(rows.get(code,{}),at,source)
+    return result
+
+
+_tdx_idle=[]
+_tdx_pool_lock=threading.Lock()
+_tdx_slots=threading.BoundedSemaphore(3)
+
+
+def native_stock_minutes(code,day,need_one=True,need_fifteen=True):
+    from coreClient.tdx_client import TdxClient
+    if not _tdx_slots.acquire(timeout=3):raise RuntimeError('Native minute source busy; temporarily unavailable')
+    try:
+        for attempt in range(2):
+            client=None
+            try:
+                with _tdx_pool_lock:
+                    while _tdx_idle:
+                        at,candidate=_tdx_idle.pop()
+                        if time.monotonic()-at<45:client=candidate;break
+                        candidate.disconnect()
+                if client is None:client=TdxClient()
+                one=client.download_one_minute(code,trade_date=day,max_pages=2) if need_one else []
+                fifteen=client.download_fifteen_minute(code,trade_date=day,max_pages=2) if need_fifteen else []
+                with _tdx_pool_lock:_tdx_idle.append((time.monotonic(),client))
+                return one,fifteen
+            except Exception:
+                if client:client.disconnect()
+                if attempt:raise
+    finally:_tdx_slots.release()
+
+
+def offline_native_minutes(code,day):
+    """Use complete post-close native periods independently; never substitute resolutions."""
+    status=live_market_status()
+    if status['phase']!='closed' or datetime.datetime.now().strftime('%H%M')<'1505':return [],[]
+    result=[]
+    for reader,count in ((get_oneMin,240),(get_fifteenMin,16)):
+        try:
+            frame=filter_after_close(reader(ts_code=code,start_date=day,end_date=day))
+            frame=frame[frame['datetime'].astype(str).str[:10].str.replace('-','')==day] if not frame.empty else frame
+            times=frame['datetime'].astype(str).str[11:16] if not frame.empty else []
+            expected=({'09:45','10:00','10:15','10:30','10:45','11:00','11:15','11:30','13:15','13:30','13:45','14:00','14:15','14:30','14:45','15:00'} if count==16 else {f'{minute//60:02d}:{minute%60:02d}' for minute in [*range(571,691),*range(781,901)]})
+            rows=frame_rows(frame) if len(frame)==count and set(times)==expected else []
+            for row in rows:
+                row['datetime']=str(row['datetime']);row['vol']=float(row.get('vol') or 0)
+            result.append(rows)
+        except Exception:result.append([])
+    return result
+
 
 def stock_series_for_date(series, cutoff):
     """Reuse completed periods; rebuild only the selected week and month from shared daily bars."""
     if not series["daily"]: return {"daily":[],"weekly":[],"monthly":[]}
     end=datetime.datetime.strptime(min(cutoff,series["latestDate"]),"%Y%m%d").date()
     day_key=lambda bar:datetime.datetime.fromtimestamp(bar["timestamp"]/1000,datetime.timezone.utc).date()
+    available=[bar for bar in series["daily"] if day_key(bar)<=end]
+    if not available:return {"daily":[],"weekly":[],"monthly":[]}
+    # A prior calendar day may be a weekend; retain the traded-day window.
+    end=day_key(available[-1])
     day_start=end-datetime.timedelta(days=2*366)
     week_start=end-datetime.timedelta(days=end.weekday())
     month_start=end.replace(day=1)
-    available=[bar for bar in series["daily"] if day_key(bar)<=end]
     def partial_period(start):
         bars=[bar for bar in available if day_key(bar)>=start]
         if not bars: return None
@@ -1520,16 +1723,9 @@ def live_stock_chart(code,day):
     if day!=now.strftime('%Y%m%d'):raise ValueError('实时接口仅支持当天，历史日期请读取离线行情')
     version=stock_data_version();revision=version['stockDataVersion'];phase=live_market_status()['phase']
     def load():
-        client=None
-        for attempt in range(2):
-            try:client=TdxClient();break
-            except Exception:
-                if attempt:raise
-        try:
-            raw_one=client.download_one_minute(code,trade_date=day,max_pages=2)
-            raw_fifteen=client.download_fifteen_minute(code,trade_date=day,max_pages=2)
-        finally:
-            if client:client.disconnect()
+        saved_one,saved_fifteen=offline_native_minutes(code,day)
+        fresh_one,fresh_fifteen=native_stock_minutes(code,day,not bool(saved_one),not bool(saved_fifteen)) if not saved_one or not saved_fifteen else ([],[])
+        raw_one=saved_one or fresh_one;raw_fifteen=saved_fifteen or fresh_fifteen
         def native_bars(rows,span):
             result=[]
             for row in rows:
@@ -1546,7 +1742,7 @@ def live_stock_chart(code,day):
         r=redis.Redis(host='127.0.0.1',port=6380,decode_responses=True,socket_timeout=2)
         quote={};keys=r.zrevrange('online:snapshot:timeline',0,0)
         if phase in ('closed','recess'):
-            observations,_,_=read_online_close('snapshot',day,r);quote=observations.get(code,{})
+            quote,_,_=online_stock_observations(code,day)['snapshot']
         elif keys:
             raw=r.hget(keys[0],code)
             if raw:quote=json.loads(raw)
@@ -1562,7 +1758,7 @@ def live_stock_chart(code,day):
             except Exception:quote={}
         if not quote_valid(quote):quote={}
         date=datetime.datetime.strptime(day,'%Y%m%d').date();prior=(date-datetime.timedelta(days=1)).strftime('%Y%m%d')
-        basis=cached_series(f'live-hover-basis:v3:{code}:{prior}:{revision}',lambda:stock_series_latest(code,prior),300)
+        basis=stock_series_latest(code,day)
         history=stock_series_for_date(basis,prior)
         start=(date-datetime.timedelta(days=14)).strftime('%Y%m%d')
         old_one=cached_series(f'live-hover-minute-history:v1:{code}:{prior}:{revision}',lambda:adjusted_one_min_payload(intraday_with_suspensions(code,start,prior),basis),300)
@@ -1571,7 +1767,7 @@ def live_stock_chart(code,day):
             if not frame.empty:frame['datetime']=frame['datetime'].astype(str).str[:19]+'+08:00'
             return adjusted_stock_intraday_bars(compact(frame,'datetime'),basis)
         past_fifteen=cached_series(f'live-hover-fifteen-history:v1:{code}:{prior}:{revision}',old_fifteen,300)
-        previous=basis['daily'][-1]['close'] if basis['daily'] else None
+        previous=history['daily'][-1]['close'] if history['daily'] else None
         prior_close=quote.get('prev_price') or previous
         # Rebase earlier adjusted prices when today's ex-rights previous close changes.
         scale=float(prior_close)/float(previous) if previous and prior_close else 1
@@ -1587,8 +1783,8 @@ def live_stock_chart(code,day):
         bars=[bar for bar in bars if datetime.datetime.fromtimestamp(bar['timestamp']/1000,zone).strftime('%Y%m%d') in days]
         facts={'code':code,'date':day,'close':close,'pct':pct,'openPct':(opening/float(prior_close)-1)*100 if prior_close else None,'amplitude':(high-low)/float(prior_close)*100 if prior_close else None,'amount':amount,'volume':volume,'floatMarketCap':None,'totalMarketCap':None,'freeFloatTurnover':None,'limitTime':None}
         live=live_ladder_snapshot();facts['limitTime']=live.get('stocks',{}).get(code,{}).get('time')
-        return {'code':code,'date':day,'isLive':True,'updatedAt':now.isoformat(),'daily':daily,'oneMin':bars,'fifteenMin':historical_fifteen+current_fifteen,'suspendedDays':old_one['suspendedDays'],'previewFacts':facts,'sources':{'oneMin':'tdx_native_1min','fifteenMin':'tdx_native_15min','daily':'live_quote+native_minute'},'liveCoverage':{'oneMinBars':len(current_one),'fifteenMinBars':len(current_fifteen)}}
-    payload=cached_series(f'live-stock-hover:v8:{code}:{day}:{revision}',load,3 if phase=='trading' or phase=='closed' and datetime.datetime.now(zone).strftime('%H%M')<'1505' else 60 if phase=='recess' else 1800)
+        return {'code':code,'date':day,'isLive':True,'updatedAt':now.isoformat(),'daily':daily,'oneMin':bars,'fifteenMin':historical_fifteen+current_fifteen,'suspendedDays':old_one['suspendedDays'],'previewFacts':facts,'sources':{'oneMin':'offline_native_1min' if saved_one else 'tdx_native_1min','fifteenMin':'offline_native_15min' if saved_fifteen else 'tdx_native_15min','daily':'live_quote+native_minute'},'liveCoverage':{'oneMinBars':len(current_one),'fifteenMinBars':len(current_fifteen)}}
+    payload=cached_series(f'live-stock-hover:v10:{code}:{day}:{revision}',load,3 if phase=='trading' or phase=='closed' and datetime.datetime.now(zone).strftime('%H%M')<'1505' else 60 if phase=='recess' else 1800)
     # Quote/fundamentals are cheap and refresh independently of the native-bar cache.
     facts=live_stock_preview_facts(code,day,payload.get('previewFacts'))
     daily=[{**bar,'turnover_rate_f':facts.get('freeFloatTurnover'),'free_float_market_cap':facts.get('freeFloatMarketCap'),'free_float_market_cap_date':facts.get('freeFloatMarketCapDate')} if datetime.datetime.fromtimestamp(bar['timestamp']/1000,datetime.timezone.utc).strftime('%Y%m%d')==day else bar for bar in payload['daily']]
@@ -1607,18 +1803,14 @@ def live_stock_preview_facts(code,day,fallback=None):
     # Offline readiness can retire the ladder overlay while current seal facts
     # are still needed. Reuse the same-day online observations independently.
     if not row:
-        def load_observations():
-            import redis
-            client=redis.Redis(host='127.0.0.1',port=6380,decode_responses=True,socket_connect_timeout=.5,socket_timeout=2)
-            return {kind:read_online_close(kind,day,client) for kind in ('snapshot','limitperformance','zt')}
-        observations=cached_series('live-stock-observations:v1:'+day,load_observations,3)
-        quotes,quote_at,_=observations['snapshot'];performance,lp_at,_=observations['limitperformance'];pool,zt_at,_=observations['zt']
+        observations=online_stock_observations(code,day)
+        q,quote_at,_=observations['snapshot'];lp,lp_at,_=observations['limitperformance'];z,zt_at,_=observations['zt']
         now=datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=8)));status=live_market_status()
         def valid(at):
             if not at:return False
             local=datetime.datetime.fromtimestamp(at,now.tzinfo)
             return local.strftime('%Y%m%d')==day and (status['phase']=='closed' or status['phase']=='recess' and local.hour>=11 or -5<=now.timestamp()-at<=120)
-        q=quotes.get(code,{}) if valid(quote_at) else {};lp=performance.get(code,{}) if valid(lp_at) else {};z=pool.get(code,{}) if valid(zt_at) else {}
+        q=q if valid(quote_at) else {};lp=lp if valid(lp_at) else {};z=z if valid(zt_at) else {}
         options=[(at,value) for at,value in ((online_stamp(q.get('snapshot_timestamp')),number(q.get('last_price'))),(lp_at,number(lp.get('close_price'))),(zt_at,number(z.get('last_price')))) if at and value and value>0]
         if options:
             _,close=max(options,key=lambda item:item[0])
@@ -1710,7 +1902,7 @@ def online_stamp(value):
         except (ValueError,TypeError):return 0
 
 
-def read_online_close(kind,day,client=None):
+def _read_online_close_uncached(kind,day,client=None):
     """Redis last batch first, with durable online SQLite fallback after archive expiry."""
     zone=datetime.timezone(datetime.timedelta(hours=8));field=kind+'_timestamp'
     def same_day(value):return value and datetime.datetime.fromtimestamp(value,zone).strftime('%Y%m%d')==day
@@ -2753,6 +2945,24 @@ class Handler(SimpleHTTPRequestHandler):
                 if payload is None:
                     payload={**ladder_stock_facts(date,code),**meta};CACHE.set(key,payload,300)
                 return self.send_json({**payload,**stock_data_version()})
+            if u.path=="/api/stock-preview":
+                code=q.get('code',[''])[0];date=safe_date(q.get('date',[''])[0])
+                if not re.fullmatch(r'\d{6}\.(SH|SZ|BJ)',code):raise ValueError('股票代码无效')
+                payload,hit=stock_preview(code,date)
+                return self.send_json(payload,headers={'X-Chart-Cache':'process-memory' if hit else 'source-load'})
+            if u.path=="/api/stock-daily-preload":
+                date=safe_date(q.get('date',[''])[0]);codes=list(dict.fromkeys(q.get('codes',[''])[0].split(',')))
+                if not 1<=len(codes)<=6 or any(not re.fullmatch(r'\d{6}\.(SH|SZ|BJ)',code) for code in codes):raise ValueError('每批预加载1到6只股票')
+                from concurrent.futures import ThreadPoolExecutor
+                pool=_daily_preload_pool
+                if pool is None:raise RuntimeError('Daily preload pool unavailable')
+                futures={code:pool.submit(stock_daily_payload,code,date) for code in codes};items=[];errors=[]
+                for code,future in futures.items():
+                    try:items.append(future.result())
+                    except Exception as exc:errors.append({'code':code,'error':type(exc).__name__})
+                return self.send_json({'items':items,'errors':errors,**stock_data_version()})
+            if u.path=="/api/chart-cache-status":
+                return self.send_json({'backend':CACHE.backend,'dailyWarm':dict(_daily_warm_status),'registeredStocks':len(_daily_hot)})
             if u.path=="/api/stock":
                 code=q.get("code",[""])[0]; date=safe_date(q.get("date",[""])[0]); latest=False
                 if not re.fullmatch(r"\d{6}\.(SH|SZ|BJ)",code): raise ValueError("股票代码无效")
@@ -2765,7 +2975,7 @@ class Handler(SimpleHTTPRequestHandler):
                     ttl=300 if latest else 7*24*3600
                     latest_day=datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=8))).date()
                     latest_end=latest_day.strftime("%Y%m%d")
-                    latest_basis=cached_series(f"series:v10:{code}:day-week-month:latest-basis:{latest_end}:{version['stockDataVersion']}",lambda:stock_series_latest(code,latest_end),300)
+                    latest_basis=stock_series_latest(code,latest_end)
                     basis_tag=f"{latest_end}:{latest_basis['adjustmentBase']}:{version['stockDataVersion']}"
                     one_key=f"series:v7:{code}:minute:5d:qfq:{basis_tag}:{freshness}{date}"
                     fifteen_key=f"series:v6:{code}:fifteen-minute:3m:qfq:{basis_tag}:{freshness}{date}"
@@ -2839,6 +3049,7 @@ class Handler(SimpleHTTPRequestHandler):
 
 if __name__=="__main__":
     CACHE=Cache()
+    start_daily_warmer()
     from live_push import LivePushHub
     PUSH_HUB=LivePushHub(live_push_event);PUSH_HUB.start()
     port=int(os.environ.get("TRADINGALERT_PORT","8765")); host=os.environ.get("TRADINGALERT_HOST","127.0.0.1")

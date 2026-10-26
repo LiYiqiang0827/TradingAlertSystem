@@ -518,7 +518,7 @@
     if(stockMeta&&Number(meta.stockVersionAt)<Number(stockMeta.stockVersionAt)&&(meta.stockDataVersion!==stockMeta.stockDataVersion||meta.stockFactsVersion!==stockMeta.stockFactsVersion))return false;
     // Keep last-good records available during a writer lock; normal reads still require the exact revision.
     if(stockMeta&&stockMeta.stockFactsVersion!==meta.stockFactsVersion)stockFactsMemoryCache.clear();
-    stockMeta={stockDataVersion:meta.stockDataVersion,stockFactsVersion:meta.stockFactsVersion,stockVersionAt:meta.stockVersionAt,chartSeriesVersion:7};stockVersionCheckedAt=Date.now();return true;
+    stockMeta={stockDataVersion:meta.stockDataVersion,stockFactsVersion:meta.stockFactsVersion,dailyDataVersion:meta.dailyDataVersion,stockVersionAt:meta.stockVersionAt,chartSeriesVersion:7};stockVersionCheckedAt=Date.now();return true;
   }
   async function currentStockDataVersion(){
     if(stockMeta&&Date.now()-stockVersionCheckedAt<60000)return stockMeta.stockDataVersion;
@@ -575,6 +575,73 @@
     const task=(async()=>{const cached=await readStockCache(code,date);if(cached)return cached;try{const payload=await api('/api/stock?code='+encodeURIComponent(code)+'&date='+date,{cache:'no-store'});const error=payload.coverage?.fifteenError||payload.latest?.coverage?.fifteenError;if(error&&transientChartFailure(error))throw new Error(error);observeStockVersion(payload);saveStockCache(code,date,payload);marketCacheSources.set(payload,{source:'network'});return payload;}catch(error){const prior=await previousChartSnapshot(stockCacheKey(code,date),stockMemoryCache,error);if(prior)return prior;throw error;}})();
     stockHistoryRequests.set(key,task);try{return await task;}finally{if(stockHistoryRequests.get(key)===task)stockHistoryRequests.delete(key);}
   }
+  // Daily-only records are independent of minute/source-pool revisions.
+  const dailyPreviewMemory=new DeadlineLRU(80,16*CACHE_MIB,2*3600000,30*60000);
+  const stockPreviewMemory=new DeadlineLRU(40,24*CACHE_MIB,2*3600000,30*60000);
+  const stockPreviewRequests=new Map();
+  let dailyPreloadGeneration=0,dailyPreloadTimer=0,dailyPreloadController=null;
+  function saveStockPreview(code,date,payload){
+    if(payload.previewVersion!==1||payload.stockDataVersion!==stockMeta?.stockDataVersion)return;
+    const key='preview:'+date+':'+code,record=chartRecord(key,payload.stockDataVersion,payload,STOCK_CACHE_TTL);
+    stockPreviewMemory.set(key,record);writeChartDisk(record);
+  }
+  async function getStockPreview(code,date){
+    const revision=await currentStockDataVersion(),key='preview:'+date+':'+code,requestKey=key+':'+revision;
+    if(stockPreviewRequests.has(requestKey))return stockPreviewRequests.get(requestKey);
+    const task=(async()=>{
+      const full=await readStockCache(code,date);if(full)return full;
+      let record=stockPreviewMemory.get(key),source='memory';
+      if(!record||record.revision!==revision){record=await readChartDisk(key,revision);source='indexeddb';}
+      if(record?.revision===revision&&record.payload?.previewVersion===1){stockPreviewMemory.set(key,record);marketCacheSources.set(record.payload,{source});return record.payload;}
+      try{
+        const payload=await api('/api/stock-preview?code='+encodeURIComponent(code)+'&date='+date,{cache:'no-store'});
+        observeStockVersion(payload);saveStockPreview(code,date,payload);marketCacheSources.set(payload,{source:'network'});return payload;
+      }catch(error){const prior=await previousChartSnapshot(key,stockPreviewMemory,error);if(prior)return prior;throw error;}
+    })();stockPreviewRequests.set(requestKey,task);try{return await task;}finally{if(stockPreviewRequests.get(requestKey)===task)stockPreviewRequests.delete(requestKey);}
+  }
+  async function readDailyPreview(code,date){
+    await currentStockDataVersion();const revision=stockMeta.dailyDataVersion,key='daily:'+date+':'+code;
+    if(!revision)return null;
+    let record=dailyPreviewMemory.get(key);if(!record||record.revision!==revision)record=await readChartDisk(key,revision);
+    if(record?.revision!==revision||!record.payload?.daily?.length)return null;
+    dailyPreviewMemory.set(key,record);return {...record.payload,stockDataVersion:stockMeta.stockDataVersion,oneMin:[],fifteenMin:[],suspendedDays:[]};
+  }
+  function scheduleDailyPreload(review){
+    const generation=++dailyPreloadGeneration,date=review.date;clearTimeout(dailyPreloadTimer);dailyPreloadController?.abort();
+    const candidates=(review.topics||[]).flatMap(topic=>topic.stocks||[]).sort((a,b)=>stockBoardNumber(b)-stockBoardNumber(a));
+    const codes=[...new Set(candidates.map(stock=>canonicalStockCode(stock.ts_code||stock.code)).filter(code=>/^\d{6}\.(SH|SZ|BJ)$/.test(code)))].slice(0,24);
+    dailyPreloadController=new AbortController();const signal=dailyPreloadController.signal;
+    document.documentElement.dataset.dailyPreloadState='scheduled';document.documentElement.dataset.dailyPreloadCount='0';
+    const run=async()=>{
+      let loaded=0;
+      try{
+        await currentStockDataVersion();
+        for(let index=0;index<codes.length;index+=4){
+          if(generation!==dailyPreloadGeneration||signal.aborted)return;if(document.hidden){document.documentElement.dataset.dailyPreloadState='paused';return;}
+          const batch=[];
+          for(const code of codes.slice(index,index+4)){if(await readDailyPreview(code,date))loaded++;else batch.push(code);}
+          if(batch.length){
+            document.documentElement.dataset.dailyPreloadState='loading';
+            const result=await api('/api/stock-daily-preload?date='+date+'&codes='+batch.join(','),{signal,priority:'low'});
+            observeStockVersion(result);
+            for(const item of result.items||[]){
+              if(item.date!==date||item.dailyDataVersion!==stockMeta.dailyDataVersion||!item.daily?.length)continue;
+              const record=chartRecord('daily:'+date+':'+item.code,item.dailyDataVersion,item,STOCK_CACHE_TTL);
+              dailyPreviewMemory.set(record.key,record);writeChartDisk(record);loaded++;
+            }
+          }
+          if(generation!==dailyPreloadGeneration)return;
+          document.documentElement.dataset.dailyPreloadCount=String(loaded);
+          // Yield between bounded batches so navigation and pointer work stay responsive.
+          await new Promise(resolve=>setTimeout(resolve,120));
+        }
+        document.documentElement.dataset.dailyPreloadState='complete';
+      }catch(error){if(error.name!=='AbortError'){document.documentElement.dataset.dailyPreloadState='deferred';console.warn('日线后台预加载稍后重试',error);}}
+    };
+    dailyPreloadTimer=setTimeout(()=>{if('requestIdleCallback' in window)requestIdleCallback(run,{timeout:2000});else run();},800);
+  }
+
+  document.addEventListener('visibilitychange',()=>{if(!document.hidden&&state.review&&document.documentElement.dataset.dailyPreloadState==='paused')scheduleDailyPreload(state.review);});
   function noteLiveStockChanges(event){
     const date=event.status?.date;if(!date)return;const stamp=Date.parse(event.receivedAt)||Date.now();
     for(const row of event.quotes||[])liveStockDirty.set(date+':'+row.code,stamp);
@@ -1168,7 +1235,7 @@
   }
   function mountHoverCharts(hover,payload,date,identity,info,isIndex=false){
     const {daily,days,specs}=hoverChartSeries(payload,date),key=hoverPoolKey(isIndex?'index':'stock',identity,date),warm=takeHoverCharts(key,payload),prefix=(isIndex?'index-preview-':'ladder-stock-preview-')+hover.requestId+'-';
-    hover.cacheKey=key;hover.card.innerHTML='<div class="vl-stock-preview-info">'+info+'</div>';hover.card.dataset.chartReused=String(Boolean(warm));
+    hover.cacheKey=key;hover.identity=identity;hover.isIndex=isIndex;hover.card.innerHTML='<div class="vl-stock-preview-info">'+info+'</div>';hover.card.dataset.chartReused=String(Boolean(warm));
     if(warm){hover.card.append(warm.node);hover.chartIds=warm.ids;hover.charts=warm.charts;hover.entries=warm.entries;hover.lastSignature=warm.signature;hover.lastPayload=warm.payload;}
     else{
       hover.card.insertAdjacentHTML('beforeend',`<div class="vl-stock-preview-charts">${specs.map(([period,title,bars])=>`<section class="vl-stock-preview-chart ${period==='oneMin'?'vl-stock-preview-wide':''}"><h4${period==='daily'&&hover.stock?' class="vl-stock-preview-daily-heading"':''}>${title}${period==='daily'&&hover.stock?ladderStockDailyQuote(hover.stock,payload,bars):`<span>${period==='oneMin'?days.length+'日':bars.length+'根'}</span>`}</h4><div id="${prefix+period}" class="vl-stock-preview-mount" data-preview-period="${period}" data-preview-bars="${bars.length}" data-preview-last-day="${bars.length?chartDayKey(bars.at(-1)):''}"></div></section>`).join('')}</div>`);
@@ -1187,7 +1254,13 @@
   function updateHoverCharts(hover,payload,date){
     const series=hoverChartSeries(payload,date),signature=hoverPayloadSignature(payload);if(hover.lastSignature===signature){hover.lastPayload=payload;return series;}hover.lastSignature=signature;hover.lastPayload=payload;
     for(const [key,title,bars] of series.specs){
-      const entry=hover.entries?.get(key);if(!entry)continue;
+      let entry=hover.entries?.get(key);
+      if(!entry&&bars.length){
+        const mount=hover.card.querySelector('[data-preview-period="'+key+'"]');if(!mount)continue;mount.replaceChildren();
+        const chart=drawChart(mount.id,bars,key,hover.identity,date,series.daily,payload.suspendedDays||[],{compact:true,detached:true,line:key==='oneMin',minBarSpace:.1,endAtLatest:true,isIndex:hover.isIndex,liveSession:payload.isLive&&key==='oneMin'});
+        if(chart){entry={id:mount.id,chart};hover.entries.set(key,entry);hover.charts.push(chart);}
+      }
+      if(!entry)continue;
       // Keep the existing canvas and window open while replacing its data.
       const plotted=key==='oneMin'?completeLiveSessionAxis(bars,date):bars;
       entry.chart.setDataLoader({getBars:({callback})=>callback(plotted,false)});
@@ -1218,7 +1291,7 @@
   }
   async function getLadderStockChartData(stock,{force=false}={}){
     const code=canonicalStockCode(stock.code),date=stock.date,key=date+':'+code;
-    if(date!==shanghaiDateKey())return getStockHistory(code,date);
+    if(date!==shanghaiDateKey())return getStockPreview(code,date);
     const revision=await currentStockDataVersion(),diskKey='live:'+key,epoch=liveStockDirty.peek(key)||0;
     if(!force){
       let record=liveStockMemoryCache.get(key),source='memory';
@@ -1281,10 +1354,18 @@
     if(!stock)return;const fromRoster=Boolean(anchor.closest('#ladderTopicHover,#ladderNestedThemeHover'));
     if(!fromRoster)closeLadderTopicHover();else{if(ladderTopicHover)clearTimeout(ladderTopicHover.hideTimer);if(ladderNestedThemeHover)clearTimeout(ladderNestedThemeHover.hideTimer);}
     const hover=ensureLadderStockHover();closeLadderStockHover();hover.anchor=anchor;const requestId=++hover.requestId,loadStarted=performance.now();
-    hover.card.setAttribute('aria-label',stock.name+' · 基本信息与行情');hover.card.dataset.stock=stock.code;hover.card.dataset.date=stock.date;for(const field of ['cacheSource','loadMs','renderMs','chartReused'])delete hover.card.dataset[field];hover.card.innerHTML=ladderStockPreviewInfo(stock,null)+'<div class="vl-stock-preview-loading" aria-live="polite">正在读取行情…</div>';hover.card.hidden=false;positionLadderStockHover(anchor,hover.card);
+    hover.card.setAttribute('aria-label',stock.name+' · 基本信息与行情');hover.card.dataset.stock=stock.code;hover.card.dataset.date=stock.date;for(const field of ['cacheSource','loadMs','renderMs','chartReused','dailyReadyMs','dailyPreloaded'])delete hover.card.dataset[field];hover.card.innerHTML=ladderStockPreviewInfo(stock,null)+'<div class="vl-stock-preview-loading" aria-live="polite">正在读取行情…</div>';hover.card.hidden=false;positionLadderStockHover(anchor,hover.card);
+    let complete=false;
+    // Show already-preloaded daily bars while native minute requests finish.
+    if(!hoverChartPool.has(hoverPoolKey('stock',stock.code,stock.date)))readDailyPreview(stock.code,stock.date).then(preview=>{
+      if(!preview||complete||requestId!==hover.requestId||hover.anchor!==anchor||!anchor.isConnected)return;
+      hover.stock=stock;mountHoverCharts(hover,preview,stock.date,stock.code,ladderStockPreviewInfo(stock,null));
+      hover.card.dataset.dailyReadyMs=(performance.now()-loadStarted).toFixed(1);hover.card.dataset.dailyPreloaded='true';
+      for(const mount of hover.card.querySelectorAll('[data-preview-period]'))if(mount.dataset.previewPeriod!=='daily')mount.innerHTML='<div class="empty-state">正在读取分钟行情…</div>';
+    }).catch(()=>{});
     try{
-      const [chartData,facts]=await Promise.all([getLadderStockChartData(stock),(stock.date===shanghaiDateKey()?Promise.resolve(null):getLadderStockFacts(stock,context.view.dataVersion)).catch(error=>{console.warn('个股基本信息读取失败',error);return null;})]),payload=chartData.isLive||chartData.previewFacts===facts||marketCacheSources.get(chartData)?.notice&&chartData.previewFacts?chartData:{...chartData,previewFacts:facts,previewFactsVersion:facts?.stockFactsVersion||stockMeta?.stockFactsVersion};if(!chartData.isLive&&payload!==chartData&&facts&&!marketCacheSources.get(chartData)?.notice)saveStockCache(canonicalStockCode(stock.code),stock.date,payload);hover.card.dataset.cacheSource=marketCacheSources.get(chartData)?.source||'network';hover.card.dataset.loadMs=(performance.now()-loadStarted).toFixed(1);if(requestId!==hover.requestId||hover.anchor!==anchor||ladderView!==context.view||!anchor.isConnected||history.state?.view!=='ladder')return;
-      const renderStarted=performance.now();hover.stock=stock;mountHoverCharts(hover,payload,stock.date,stock.code,ladderStockPreviewInfo(stock,payload));hover.card.dataset.renderMs=(performance.now()-renderStarted).toFixed(1);applyHoverCacheNote(hover,marketCacheSources.get(chartData));
+      const [chartData,facts]=await Promise.all([getLadderStockChartData(stock),(stock.date===shanghaiDateKey()?Promise.resolve(null):getLadderStockFacts(stock,context.view.dataVersion)).catch(error=>{console.warn('个股基本信息读取失败',error);return null;})]),payload=chartData.isLive||chartData.previewFacts===facts||marketCacheSources.get(chartData)?.notice&&chartData.previewFacts?chartData:{...chartData,previewFacts:facts,previewFactsVersion:facts?.stockFactsVersion||stockMeta?.stockFactsVersion};if(!chartData.isLive&&payload!==chartData&&facts&&!marketCacheSources.get(chartData)?.notice){if(payload.previewVersion===1)saveStockPreview(canonicalStockCode(stock.code),stock.date,payload);else saveStockCache(canonicalStockCode(stock.code),stock.date,payload);}hover.card.dataset.cacheSource=marketCacheSources.get(chartData)?.source||'network';hover.card.dataset.loadMs=(performance.now()-loadStarted).toFixed(1);complete=true;if(requestId!==hover.requestId||hover.anchor!==anchor||ladderView!==context.view||!anchor.isConnected||history.state?.view!=='ladder')return;
+      const renderStarted=performance.now();hover.stock=stock;if(hover.entries?.size){hover.card.querySelector('.vl-stock-preview-info').innerHTML=ladderStockPreviewInfo(stock,payload);updateHoverCharts(hover,payload,stock.date);}else mountHoverCharts(hover,payload,stock.date,stock.code,ladderStockPreviewInfo(stock,payload));hover.card.dataset.renderMs=(performance.now()-renderStarted).toFixed(1);applyHoverCacheNote(hover,marketCacheSources.get(chartData));
       if(payload.isLive)scheduleLiveHoverRefresh(hover,async()=>{
         const next=await getLadderStockChartData(stock,{force:true});
         if(requestId!==hover.requestId||hover.anchor!==anchor||!anchor.isConnected||ladderView!==context.view||history.state?.view!=='ladder')return;
@@ -1294,7 +1375,7 @@
       hover.resizeObserver=new ResizeObserver(()=>{if(!hover.card.hidden)for(const chart of hover.charts){chart.resize();chart.setOffsetRightDistance(0);chart.scrollToRealTime(0);}});hover.resizeObserver.observe(hover.card);
       document.documentElement.dataset.stockMemoryCount=String(stockMemoryCache.size);document.documentElement.dataset.stockMemoryBytes=String(stockMemoryCache.bytes);document.documentElement.dataset.liveStockMemoryCount=String(liveStockMemoryCache.size);
       if(payload.isLive&&marketCacheSources.get(chartData)?.refresh)queueMicrotask(()=>{if(requestId===hover.requestId&&!hover.card.hidden)refreshPushedHover(hover);});
-    }catch(error){if(requestId!==hover.requestId||hover.anchor!==anchor)return;for(const field of ['cacheSource','loadMs','renderMs','chartReused'])delete hover.card.dataset[field];hover.card.innerHTML=ladderStockPreviewInfo(stock,null)+'<div class="vl-stock-preview-loading">行情读取失败：'+esc(error.message)+'</div>';positionLadderStockHover(anchor,hover.card);}
+    }catch(error){complete=true;if(requestId!==hover.requestId||hover.anchor!==anchor)return;for(const id of hover.chartIds)try{window.klinecharts.dispose(id);}catch{}hover.chartIds=[];hover.charts=[];hover.entries=null;for(const field of ['cacheSource','loadMs','renderMs','chartReused','dailyReadyMs','dailyPreloaded'])delete hover.card.dataset[field];hover.card.innerHTML=ladderStockPreviewInfo(stock,null)+'<div class="vl-stock-preview-loading">行情读取失败：'+esc(error.message)+'</div>';positionLadderStockHover(anchor,hover.card);}
   }
   function ensureLadderStockHover(){
     if(ladderStockHover)return ladderStockHover;
@@ -2507,7 +2588,7 @@
       const review=await api(`/api/review?date=${date}`);
       if(!current())return false;
       if(review.date!==date)throw new Error('返回的行情日期与所选日期不一致');
-      state.review=review;
+      state.review=review;scheduleDailyPreload(review);
       $('#dataSourceLabel').textContent=`已连接 · 涨停行情库${review.analysisStatus==='待补充'?' · 题材分析待补充':''}`;
       $('#crumbCurrent').textContent='每日总览';if(renderHomePage)renderHome();return true;
     }catch(error){
