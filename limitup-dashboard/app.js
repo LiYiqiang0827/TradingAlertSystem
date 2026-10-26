@@ -1648,17 +1648,17 @@
     const finish=event=>{if(!pan||event.pointerId!==pan.id)return;const moved=pan.moved;pan=null;view.dragging=false;host.classList.remove('vl-panning');if(host.hasPointerCapture(event.pointerId))host.releasePointerCapture(event.pointerId);if(view.pendingPaint){view.pendingPaint=false;rebuildVerticalLadder(view);}view.updateLegend?.();if(moved)prefetchLadderEdge(host,view);};
     host.addEventListener('pointerdown',event=>{if(event.button!==0||event.target.closest('.vl-board-header,.vl-date-rail,.vl-stock,.vl-inlet,.vl-edge,.vl-group-box,.vl-inline-theme,[data-vl-outcome]'))return;pan={id:event.pointerId,x:event.clientX,y:event.clientY,left:host.scrollLeft,top:host.scrollTop,moved:false};view.dragging=true;host.setPointerCapture(event.pointerId);event.preventDefault();});
     host.addEventListener('pointermove',event=>{if(!pan||event.pointerId!==pan.id)return;const dx=event.clientX-pan.x,dy=event.clientY-pan.y;if(!pan.moved&&Math.hypot(dx,dy)<3)return;pan.moved=true;host.classList.add('vl-panning');host.scrollLeft=pan.left-dx;host.scrollTop=pan.top-dy;event.preventDefault();});
-    host.addEventListener('pointerup',finish);host.addEventListener('pointercancel',finish);host.addEventListener('lostpointercapture',()=>{pan=null;view.dragging=false;host.classList.remove('vl-panning');});
+    host.addEventListener('pointerup',finish);host.addEventListener('pointercancel',finish);host.addEventListener('lostpointercapture',event=>{if(pan)finish({pointerId:event.pointerId});});
   }
   function setupLadderDateSlider(header,columns){
-    const view=ladderView;if(!header||!view)return;const last=state.dates.length-1,step=columns[0]?.width||188;let drag=null,preview=view.end;
+    const view=ladderView;if(!header||!view)return;view.rulerAbort?.abort();const controller=view.rulerAbort=new AbortController(),listen=(type,handler)=>header.addEventListener(type,handler,{signal:controller.signal});const last=state.dates.length-1,step=columns[0]?.width||188;let drag=null,preview=view.end;
     header.setAttribute('role','slider');header.tabIndex=0;header.setAttribute('aria-label','拖动日期滑条选择天梯截止日');header.setAttribute('aria-orientation','horizontal');header.setAttribute('aria-valuemin','0');header.setAttribute('aria-valuemax',String(last));header.title='单击日期查看每日总览；按住左右拖动切换截止日';
     const paintPreview=index=>{preview=Math.max(0,Math.min(last,index));const delta=preview-view.end;header.setAttribute('aria-valuenow',String(preview));header.setAttribute('aria-valuetext',formatCalendarDate(state.dates[preview]));for(const label of header.querySelectorAll('[data-vl-date]')){const day=state.dates[state.dates.indexOf(label.dataset.vlDate)+delta];label.textContent=day?day.slice(4,6)+'/'+day.slice(6):'';label.classList.toggle('vl-date-selected',day===state.dates[preview]);}updateLadderDateControls(state.dates[preview]);};
-    const finish=event=>{if(!drag||event.pointerId!==drag.id)return;const finished=drag;drag=null;view.dragging=false;header.classList.remove('vl-ruler-dragging');if(header.hasPointerCapture(event.pointerId))header.releasePointerCapture(event.pointerId);if(event.type==='pointercancel'){paintPreview(view.end);if(view.pendingPaint){view.pendingPaint=false;rebuildVerticalLadder(view);}}else if(finished.moved){if(preview!==view.end)openLadderDate(state.dates[preview],true);else if(view.pendingPaint){view.pendingPaint=false;rebuildVerticalLadder(view);}}else if(finished.day)openHome(finished.day);};
-    header.addEventListener('pointerdown',event=>{if(event.button!==0||event.target.closest('.vl-date-corner'))return;closeDatePicker();closeLadderTopicHover();drag={id:event.pointerId,x:event.clientX,y:event.clientY,day:event.target.closest('[data-vl-date]')?.dataset.vlDate||'',moved:false};view.dragging=true;header.setPointerCapture(event.pointerId);header.classList.add('vl-ruler-dragging');event.preventDefault();event.stopPropagation();});
-    header.addEventListener('pointermove',event=>{if(!drag||event.pointerId!==drag.id)return;if(Math.hypot(drag.x-event.clientX,drag.y-event.clientY)>4)drag.moved=true;paintPreview(view.end+Math.round((drag.x-event.clientX)/step));if(view.rulerWarmTimer)clearTimeout(view.rulerWarmTimer);const warmIndex=preview;view.rulerWarmTimer=setTimeout(()=>{view.rulerWarmTimer=0;if(ladderView!==view||!view.dragging)return;if(!view.days.has(state.dates[warmIndex]))getLadderPayload(state.dates[warmIndex],Math.min(LADDER_PRELOAD_SESSIONS,warmIndex+1)).catch(error=>console.warn('天梯范围预取稍后重试',error));else if(warmIndex-view.low<ladderViewportSessions()+5)loadVerticalLadder('older');},120);event.preventDefault();});
-    header.addEventListener('pointerup',finish);header.addEventListener('pointercancel',finish);header.addEventListener('lostpointercapture',()=>{drag=null;view.dragging=false;header.classList.remove('vl-ruler-dragging');});
-    header.addEventListener('keydown',event=>{const date=event.target.closest('[data-vl-date]')?.dataset.vlDate;if(date&&['Enter',' '].includes(event.key)){event.preventDefault();event.stopPropagation();openHome(date);return;}const deltas={ArrowLeft:-1,ArrowRight:1,PageUp:-ladderViewportSessions(),PageDown:ladderViewportSessions()};let target;if(event.key==='Home')target=0;else if(event.key==='End')target=last;else if(event.key in deltas)target=view.end+deltas[event.key];else return;event.preventDefault();target=Math.max(0,Math.min(last,target));if(target!==view.end)openLadderDate(state.dates[target],true);});
+    const finish=event=>{if(!drag||event.pointerId!==drag.id)return;const finished=drag;drag=null;if(view.rulerWarmTimer){clearTimeout(view.rulerWarmTimer);view.rulerWarmTimer=0;}view.dragging=false;header.classList.remove('vl-ruler-dragging');if(header.hasPointerCapture(event.pointerId))header.releasePointerCapture(event.pointerId);if(event.type==='pointercancel'){paintPreview(view.end);if(view.pendingPaint){view.pendingPaint=false;rebuildVerticalLadder(view);}}else if(finished.moved){if(preview!==view.end)openLadderDate(state.dates[preview],true);else if(view.pendingPaint){view.pendingPaint=false;rebuildVerticalLadder(view);}}else if(finished.day)openHome(finished.day);};
+    listen('pointerdown',event=>{if(event.button!==0||event.target.closest('.vl-date-corner'))return;closeDatePicker();closeLadderTopicHover();drag={id:event.pointerId,x:event.clientX,y:event.clientY,day:event.target.closest('[data-vl-date]')?.dataset.vlDate||'',moved:false};view.dragging=true;header.setPointerCapture(event.pointerId);header.classList.add('vl-ruler-dragging');event.preventDefault();event.stopPropagation();});
+    listen('pointermove',event=>{if(!drag||event.pointerId!==drag.id)return;if(Math.hypot(drag.x-event.clientX,drag.y-event.clientY)>4)drag.moved=true;paintPreview(view.end+Math.round((drag.x-event.clientX)/step));if(view.rulerWarmTimer)clearTimeout(view.rulerWarmTimer);const warmIndex=preview;view.rulerWarmTimer=setTimeout(()=>{view.rulerWarmTimer=0;if(ladderView!==view||!view.dragging)return;if(!view.days.has(state.dates[warmIndex]))getLadderPayload(state.dates[warmIndex],Math.min(LADDER_PRELOAD_SESSIONS,warmIndex+1)).catch(error=>console.warn('天梯范围预取稍后重试',error));else if(warmIndex-view.low<ladderViewportSessions()+5)loadVerticalLadder('older');},120);event.preventDefault();});
+    listen('pointerup',finish);listen('pointercancel',finish);listen('lostpointercapture',event=>{if(drag)finish({pointerId:event.pointerId,type:'pointercancel'});});
+    listen('keydown',event=>{const date=event.target.closest('[data-vl-date]')?.dataset.vlDate;if(date&&['Enter',' '].includes(event.key)){event.preventDefault();event.stopPropagation();openHome(date);return;}const deltas={ArrowLeft:-1,ArrowRight:1,PageUp:-ladderViewportSessions(),PageDown:ladderViewportSessions()};let target;if(event.key==='Home')target=0;else if(event.key==='End')target=last;else if(event.key in deltas)target=view.end+deltas[event.key];else return;event.preventDefault();target=Math.max(0,Math.min(last,target));if(target!==view.end)openLadderDate(state.dates[target],true);});
     paintPreview(view.end);
   }
   function deferLadderNavigation(event,action){
@@ -1680,20 +1680,20 @@
     return new Map([...raw].map(([id,node])=>{const peak=peaks.get(find(id));return [id,{...node,originalTheme:node.theme,theme:peak.theme,themePeakDate:peak.sourceDate||peak.date,themePeakBoard:peak.board}];}));
   }
   async function loadLadderBrokenStocks(view){
-    if(view.breakLoading||ladderView!==view)return;
+    if(view.breakLoading||ladderView!==view||history.state?.view!=='ladder'||!$('#ladderChart'))return;
     const dates=[...view.days].filter(day=>!view.brokenDates.has(day)).sort().slice(0,30);if(!dates.length)return;
     if(view.breakRetryTimer){clearTimeout(view.breakRetryTimer);view.breakRetryTimer=0;}view.breakLoading=true;
-    try{const payload=await api(`/api/ladder-breaks?start=${dates[0]}&end=${dates.at(-1)}`,{cache:'no-store'});if(ladderView!==view||payload.ladderDataVersion!==view.dataVersion)return;
+    try{const payload=await api(`/api/ladder-breaks?start=${dates[0]}&end=${dates.at(-1)}`,{cache:'no-store'});if(ladderView!==view||history.state?.view!=='ladder'||!$('#ladderChart')||payload.ladderDataVersion!==view.dataVersion)return;
       view.breakError=false;view.breakFailures=0;for(const day of payload.dates)view.brokenDates.add(day);for(const stock of payload.brokenStocks)view.broken.set(stock.id,stock);
-      if(view.dragging)view.pendingPaint=true;else rebuildVerticalLadder(view);
+      if(view.dragging||view.deferFirstPaint)view.pendingPaint=true;else rebuildVerticalLadder(view);
     }catch(error){
-      if(ladderView!==view)return;
+      if(ladderView!==view||history.state?.view!=='ladder'||!$('#ladderChart'))return;
       console.warn('天梯破板数据读取失败',error);view.breakError=true;view.breakFailures=(view.breakFailures||0)+1;
-      if(view.breakFailures<=2)view.breakRetryTimer=setTimeout(()=>{view.breakRetryTimer=0;if(ladderView===view)loadLadderBrokenStocks(view);},500*2**(view.breakFailures-1));
+      if(view.breakFailures<=2)view.breakRetryTimer=setTimeout(()=>{view.breakRetryTimer=0;if(ladderView===view&&history.state?.view==='ladder')loadLadderBrokenStocks(view);},500*2**(view.breakFailures-1));
       else toast('破板数据暂未读到，请重新选择日期重试');
     }
     finally{view.breakLoading=false;}
-    if(ladderView===view&&!view.breakError&&[...view.days].some(day=>!view.brokenDates.has(day)))loadLadderBrokenStocks(view);
+    if(ladderView===view&&history.state?.view==='ladder'&&!view.breakError&&[...view.days].some(day=>!view.brokenDates.has(day)))loadLadderBrokenStocks(view);
   }
   function mergeLadderPayload(view,payload,source){
       if(payload.live){
@@ -1720,7 +1720,7 @@
       view.liveLegendPayload=legend;(view.specifiedLegendCache||=new Map()).set(date+':'+view.dataVersion,legend);
       if(view.specifiedDay===date){view.specifiedLegendPayload=legend;view.specifiedLegendRequestId=(view.specifiedLegendRequestId||0)+1;}
     }
-    loadLadderBrokenStocks(view);
+    view.breakTask=loadLadderBrokenStocks(view);
   }
   function rebuildVerticalLadder(view,anchor='preserve'){
     if(ladderView!==view||history.state?.view!=='ladder'||!$('#ladderChart'))return;view.pendingPaint=false;
@@ -1762,11 +1762,20 @@
       if(ladderView!==view||history.state?.view!=='ladder'||!$('#ladderChart'))return;
       // A source repair invalidates the whole in-memory range, just like persistent blocks.
       if(view.dataVersion&&view.dataVersion!==result.payload.ladderDataVersion){view.loading=false;await renderLimitupLadder();return;}
+      const firstPaint=direction==='initial'&&!view.data;
+      if(firstPaint)view.deferFirstPaint=true;
       mergeLadderPayload(view,result.payload,result.source);
+      if(firstPaint&&view.breakTask){
+        // Merge a cached supplement before building the SVG; a cold request
+        // gets at most 40 ms and can still add its data after the first paint.
+        await new Promise(resolve=>{const timer=setTimeout(resolve,40);const done=()=>{clearTimeout(timer);resolve();};view.breakTask.then(done,done);});
+        view.deferFirstPaint=false;
+        if(ladderView!==view||history.state?.view!=='ladder'||!$('#ladderChart'))return;
+      }
       if(view.dragging)view.pendingPaint=true;else rebuildVerticalLadder(view,direction==='initial'?'end':'preserve');
       $('#ladderChart').setAttribute('aria-busy','false');if(status)status.hidden=true;
-    }catch(error){if(ladderView===view){if(status){status.hidden=false;status.textContent='加载失败：'+error.message;}if(!view.data)$('#ladderChart').innerHTML='<div class="empty-state">'+esc(error.message)+'</div>';}}
-    finally{view.loading=false;}
+    }catch(error){const chart=$('#ladderChart');if(ladderView===view&&history.state?.view==='ladder'&&chart){if(status?.isConnected){status.hidden=false;status.textContent='加载失败：'+error.message;}if(!view.data)chart.innerHTML='<div class="empty-state">'+esc(error.message)+'</div>';}}
+    finally{view.loading=false;view.deferFirstPaint=false;}
   }
   function ladderBoardBadgeStyle(node){
     if(node.board_shape==='one_word')return {kind:'one-word',label:'一字板',color:'#dc3f40',dashed:false};
@@ -1918,7 +1927,7 @@
     if(compact||!folded||liveDefault)view.expandedUnpromoted.add(key);
   }
   function paintLimitupLadder(data){
-    const host=$('#ladderChart');if(!host||!data)return;if(ladderView.focusedStock)host.dataset.stockFocus=ladderView.focusedStock;if(ladderView.stockOnly&&ladderView.focusedStock)host.dataset.stockOnly=ladderView.focusedStock;else delete host.dataset.stockOnly;const paintStarted=performance.now(),patchPaint=Boolean((ladderView.patchPaint||ladderView.live)&&host.querySelector('svg'));ladderView.patchPaint=false;closeLadderTopicHover();
+    const host=$('#ladderChart');if(!host||!data)return;if(ladderView.focusedStock)host.dataset.stockFocus=ladderView.focusedStock;if(ladderView.stockOnly&&ladderView.focusedStock)host.dataset.stockOnly=ladderView.focusedStock;else delete host.dataset.stockOnly;const paintStarted=performance.now();if(ladderView.rowHeightTimer){clearTimeout(ladderView.rowHeightTimer);ladderView.rowHeightTimer=0;}const patchPaint=Boolean((ladderView.patchPaint||ladderView.live)&&host.querySelector('svg'));ladderView.patchPaint=false;closeLadderTopicHover();
     const previousCards=viewCardCache(ladderView,data),nextCards=new Map();ladderView.reuseCardDOM=patchPaint;
     const paintProfile={},markPaint=name=>{paintProfile[name]=Number((performance.now()-paintStarted).toFixed(1));};
     const fullData=data,view=ladderView,hiddenLevels=view.hiddenLevels||=new Set(),compactThemes=new Set(view.compactThemes||[view.compactTheme].filter(Boolean)),compactTheme=[...compactThemes][0]||'',minBoard=view.minBoard||0,compactLayout=Boolean(compactThemes.size||minBoard);if(view.singleClickTimer){clearTimeout(view.singleClickTimer);view.singleClickTimer=0;}if(view.legendClickTimer){clearTimeout(view.legendClickTimer);view.legendClickTimer=0;}
@@ -2115,7 +2124,7 @@
     markPaint('dom');
     host.scrollLeft=painted?oldLeft:host.scrollWidth-host.clientWidth;
     if(view.rowViewportAnchor){const anchor=view.rowViewportAnchor,row=rows.find(row=>row.level===anchor.level);view.rowViewportAnchor=null;if(row)host.scrollTop=28+row.y+Math.min(anchor.offset,Math.max(0,row.height-1));}
-    if(!patchPaint)setupLadderDateSlider(host.querySelector('.vl-board-header'),columns);
+    setupLadderDateSlider(host.querySelector('.vl-board-header'),columns);
     markPaint('layout');
     const legend=$('#ladderLegend'),selectedThemes=new Set(compactThemes.size?compactThemes:[view.focusedTheme].filter(Boolean));let navigating=false,legendAppearanceSignature='';
     let stockFocusIndex=null;

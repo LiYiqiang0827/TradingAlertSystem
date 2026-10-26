@@ -302,6 +302,28 @@ class Cache:
             with self.lock:
                 self.db.execute("insert or replace into cache values (?,?,?)",(key,raw,int(datetime.datetime.now().timestamp())+ttl)); self.db.commit()
 
+    def get_many(self,keys):
+        if not keys:return []
+        if self.redis:return [json.loads(raw) if raw else None for raw in self.redis.mget(keys)]
+        now=int(time.time())
+        with self.lock:
+            found={}
+            for offset in range(0,len(keys),300):
+                chunk=keys[offset:offset+300];marks=','.join('?' for _ in chunk)
+                found.update(self.db.execute(f'select key,value from cache where key in ({marks}) and expires>?',[*chunk,now]).fetchall())
+            return [json.loads(found[key]) if key in found else None for key in keys]
+
+    def set_many(self,values,ttl=21600):
+        raw={key:json.dumps(value,ensure_ascii=False,separators=(',',':'),allow_nan=False) for key,value in values.items()}
+        if self.redis:
+            with self.redis.pipeline(transaction=False) as pipeline:
+                for key,value in raw.items():pipeline.setex(key,ttl,value)
+                pipeline.execute()
+        else:
+            with self.lock:
+                expires=int(time.time())+ttl
+                self.db.executemany('insert or replace into cache values (?,?,?)',[(key,value,expires) for key,value in raw.items()]);self.db.commit()
+
     def delete(self,key):
         if self.redis:self.redis.delete(key)
         else:
@@ -755,78 +777,92 @@ def filter_unsealed_breaks(date, stocks):
         print(f"[review] break-stock verification unavailable for {date}: {type(exc).__name__}: {exc}",flush=True)
         return []
 
-def previous_limitup_trading_info(code, date):
-    """Distance from the current board period's first board to the prior period's last board."""
-    cache_key=f"previous-limitup-gap:v5:{code}:{date}:{database_revision((BASIC_DB,KPL_DB))}"
-    cached=CACHE.get(cache_key) if CACHE is not None else None
-    if cached is not None:
-        return cached
-    try:
-        with sqlite3.connect(f"file:{BASIC_DB}?mode=ro",uri=True,timeout=3) as c:
-            sessions=[str(row[0]) for row in c.execute(
-                "SELECT cal_date FROM tbl_cn_tradecal WHERE exchange='SSE' AND is_open=1 AND cal_date<=? GROUP BY cal_date ORDER BY cal_date",
-                (date,)).fetchall()]
-        indexes={day:i for i,day in enumerate(sessions)}
-        with sqlite3.connect(f"file:{KPL_DB}?mode=ro",uri=True,timeout=3) as c:
-            rows=c.execute(
-                'SELECT trade_date,up_stat FROM tbl_cn_limit_list WHERE ts_code=? AND "limit"=? AND trade_date<=? ORDER BY trade_date',
-                (code,"U",date)).fetchall()
-            up_stats={str(day):str(stat or "") for day,stat in rows}
-            limit_dates=set(up_stats)
-            tables={row[0] for row in c.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-            periods={}
-            if "tbl_cn_kpl_list" in tables:
-                periods={str(day):str(status or "") for day,status in c.execute(
-                    "SELECT trade_date,status FROM tbl_cn_kpl_list WHERE ts_code=? AND tag='涨停' AND trade_date<=? ORDER BY trade_date",
-                    (code,date)).fetchall()}
-                limit_dates.update(periods)
-            if "tbl_cn_kpl_limit_performance" in tables:
-                for day,period in c.execute(
-                    "SELECT trade_date,board_period FROM tbl_cn_kpl_limit_performance WHERE ts_code=? AND trade_date<=? ORDER BY trade_date",
-                    (code,date)).fetchall():
-                    if period and not periods.get(str(day)):
-                        periods[str(day)]=str(period)
-        limit_dates.intersection_update(indexes)
-        value=None
-        historical_first=False
-        if date in indexes and limit_dates:
-            event_index=indexes[date]
-            # Failed promotion still belongs to the previous trading day's board period.
-            if date not in limit_dates and event_index>0 and sessions[event_index-1] in limit_dates:
-                event_index-=1
-            event_day=sessions[event_index]
-            anchor_index=event_index
-            if event_day in limit_dates:
-                status=periods.get(event_day,"")
-                period_match=re.search(r"(\d+)\s*天\s*(\d+)\s*板",status)
-                period_days=None
-                if period_match:
-                    days,boards=map(int,period_match.groups())
+def _limitup_gap_from_history(date,sessions,indexes,limit_dates,periods,up_stats):
+    value=None
+    historical_first=False
+    if date in indexes and limit_dates:
+        event_index=indexes[date]
+        # Failed promotion still belongs to the previous trading day's board period.
+        if date not in limit_dates and event_index>0 and sessions[event_index-1] in limit_dates:
+            event_index-=1
+        event_day=sessions[event_index]
+        anchor_index=event_index
+        if event_day in limit_dates:
+            status=periods.get(event_day,"")
+            period_match=re.search(r"(\d+)\s*天\s*(\d+)\s*板",status)
+            period_days=None
+            if period_match:
+                days,boards=map(int,period_match.groups())
+                if 1<=boards<=days:
+                    period_days=days
+            elif not status:
+                # limit_list up_stat stores board count / trading-day window.
+                fallback=re.fullmatch(r"(\d+)\s*/\s*(\d+)",up_stats.get(event_day,""))
+                if fallback:
+                    boards,days=map(int,fallback.groups())
                     if 1<=boards<=days:
                         period_days=days
-                elif not status:
-                    # limit_list up_stat stores board count / trading-day window.
-                    fallback=re.fullmatch(r"(\d+)\s*/\s*(\d+)",up_stats.get(event_day,""))
-                    if fallback:
-                        boards,days=map(int,fallback.groups())
-                        if 1<=boards<=days:
-                            period_days=days
-                if period_days is not None:
-                    # Internal unsealed sessions remain part of N-day/M-board periods.
-                    anchor_index=max(0,event_index-period_days+1)
-                else:
-                    while anchor_index>0 and sessions[anchor_index-1] in limit_dates:
-                        anchor_index-=1
-            prior_indexes=[indexes[day] for day in limit_dates if indexes[day]<anchor_index]
-            value=anchor_index-max(prior_indexes) if prior_indexes else None
-            historical_first=event_day in limit_dates and not prior_indexes
-        result={"days":value,"historicalFirst":historical_first}
-        if CACHE is not None:
-            CACHE.set(cache_key,result,30*24*3600)
-        return result
-    except Exception as exc:
-        print(f"[stock] prior limit-up interval unavailable for {code} {date}: {type(exc).__name__}: {exc}",flush=True)
-        return {"days":None,"historicalFirst":False}
+            if period_days is not None:
+                # Internal unsealed sessions remain part of N-day/M-board periods.
+                anchor_index=max(0,event_index-period_days+1)
+            else:
+                while anchor_index>0 and sessions[anchor_index-1] in limit_dates:
+                    anchor_index-=1
+        prior_indexes=[indexes[day] for day in limit_dates if indexes[day]<anchor_index]
+        value=anchor_index-max(prior_indexes) if prior_indexes else None
+        historical_first=event_day in limit_dates and not prior_indexes
+    result={"days":value,"historicalFirst":historical_first}
+    return result
+
+
+def previous_limitup_trading_infos(codes, date):
+    """Read one calendar and batched histories for all requested stocks."""
+    codes=sorted(set(codes))
+    if not codes:return {}
+    revision=database_revision((BASIC_DB,KPL_DB))
+    keys={code:f'previous-limitup-gap:v5:{code}:{date}:{revision}' for code in codes}
+    cached=CACHE.get_many(list(keys.values())) if CACHE is not None else [None]*len(codes)
+    result={code:value for code,value in zip(codes,cached) if value is not None}
+    missing=[code for code in codes if code not in result]
+    if not missing:return result
+    with _cache_load_locks.hold(f'limitup-gap-batch:{date}:{revision}'):
+        cached=CACHE.get_many([keys[code] for code in missing]) if CACHE is not None else [None]*len(missing)
+        result.update({code:value for code,value in zip(missing,cached) if value is not None})
+        missing=[code for code in missing if code not in result]
+        if not missing:return result
+        try:
+            with sqlite3.connect(f'file:{BASIC_DB}?mode=ro',uri=True,timeout=3) as c:
+                sessions=[str(row[0]) for row in c.execute("SELECT cal_date FROM tbl_cn_tradecal WHERE exchange='SSE' AND is_open=1 AND cal_date<=? GROUP BY cal_date ORDER BY cal_date",(date,))]
+            indexes={day:i for i,day in enumerate(sessions)}
+            history={code:{'dates':set(),'periods':{},'up_stats':{}} for code in missing}
+            with sqlite3.connect(f'file:{KPL_DB}?mode=ro',uri=True,timeout=3) as c:
+                tables={row[0] for row in c.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+                for offset in range(0,len(missing),300):
+                    chunk=missing[offset:offset+300];marks=','.join('?' for _ in chunk)
+                    for day,code,stat in c.execute(f'''SELECT trade_date,ts_code,up_stat FROM tbl_cn_limit_list WHERE ts_code IN ({marks}) AND "limit"='U' AND trade_date<=? ORDER BY trade_date''',[*chunk,date]):
+                        info=history[code];info['dates'].add(str(day));info['up_stats'][str(day)]=str(stat or '')
+                    if 'tbl_cn_kpl_list' in tables:
+                        for day,code,status in c.execute(f"SELECT trade_date,ts_code,status FROM tbl_cn_kpl_list WHERE ts_code IN ({marks}) AND tag='涨停' AND trade_date<=? ORDER BY trade_date",[*chunk,date]):
+                            info=history[code];info['dates'].add(str(day));info['periods'][str(day)]=str(status or '')
+                    if 'tbl_cn_kpl_limit_performance' in tables:
+                        for day,code,status in c.execute(f'SELECT trade_date,ts_code,board_period FROM tbl_cn_kpl_limit_performance WHERE ts_code IN ({marks}) AND trade_date<=? ORDER BY trade_date',[*chunk,date]):
+                            info=history[code]
+                            if status and not info['periods'].get(str(day)):info['periods'][str(day)]=str(status)
+            fresh={}
+            for code,info in history.items():
+                info['dates'].intersection_update(indexes)
+                fresh[code]=_limitup_gap_from_history(date,sessions,indexes,info['dates'],info['periods'],info['up_stats'])
+            if CACHE is not None and database_revision((BASIC_DB,KPL_DB))==revision:
+                CACHE.set_many({keys[code]:value for code,value in fresh.items()},30*86400)
+            result.update(fresh)
+        except Exception as exc:
+            print(f'[stock] batch prior limit-up intervals unavailable for {date}: {type(exc).__name__}: {exc}',flush=True)
+            result.update({code:{'days':None,'historicalFirst':False} for code in missing})
+    return result
+
+
+def previous_limitup_trading_info(code,date):
+    return previous_limitup_trading_infos([code],date)[code]
 
 
 def kpl_pool(date):
@@ -2595,7 +2631,7 @@ def review_cache_key(date):
 
 def review_data(date):
     key=review_cache_key(date)
-    complete_key="complete:v3:"+key
+    complete_key="complete:v4:"+key
     def load():
         report=CACHE.get(key)
         if report is None:
@@ -2619,20 +2655,13 @@ def review_data(date):
         if report["marketStats"].get("sealed") is not None:
             report["pool"]["all_break_stocks"]=report["marketStats"].pop("allBreakStocks")
             report["pool"]["break_stocks"]=report["marketStats"].pop("firstBoardBreakStocks")
-        span_cache={}
-        def add_limitup_span(stock):
-            code=str(stock.get("ts_code") or stock.get("code") or "")
-            if not re.fullmatch(r"\d{6}\.(SH|SZ|BJ)",code): return
-            if code not in span_cache: span_cache[code]=previous_limitup_trading_info(code,date)
-            info=span_cache[code]
-            stock["previousLimitUpTradingDays"]=info["days"]
-            stock["previousLimitUpHistoricalFirst"]=info["historicalFirst"]
-        for stock in report.get("pool",{}).get("stocks",[]): add_limitup_span(stock)
-        for stock in report.get("pool",{}).get("break_stocks",[]): add_limitup_span(stock)
-        for stock in report.get("pool",{}).get("all_break_stocks",[]): add_limitup_span(stock)
-        for stock in report.get("marketStats",{}).get("nonPromotedStocks",[]): add_limitup_span(stock)
-        for topic in report.get("topics",[]):
-            for stock in topic.get("stocks",[]): add_limitup_span(stock)
+        span_stocks=[*report.get("pool",{}).get("stocks",[]),*report.get("pool",{}).get("break_stocks",[]),*report.get("pool",{}).get("all_break_stocks",[]),*report.get("marketStats",{}).get("nonPromotedStocks",[]),*[stock for topic in report.get("topics",[]) for stock in topic.get("stocks",[])]]
+        span_cache=previous_limitup_trading_infos([str(stock.get("ts_code") or stock.get("code") or "") for stock in span_stocks if re.fullmatch(r"\d{6}\.(SH|SZ|BJ)",str(stock.get("ts_code") or stock.get("code") or ""))],date)
+        for stock in span_stocks:
+            info=span_cache.get(str(stock.get("ts_code") or stock.get("code") or ""))
+            if info is not None:
+                stock["previousLimitUpTradingDays"]=info["days"]
+                stock["previousLimitUpHistoricalFirst"]=info["historicalFirst"]
         report["stockConcepts"]=stock_concepts(date)
         return report
     return cached_series(complete_key,load,60)
