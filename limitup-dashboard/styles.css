@@ -676,11 +676,10 @@ body:has(.ladder-vertical) .topbar{display:none}.content:has(.ladder-vertical){p
 
 .vl-relimit{pointer-events:stroke}.vl-edge.vl-relimit,.vl-edge.vl-relimit:hover{opacity:.5;stroke-width:.8}.vl-relimit-notes{pointer-events:none}.vl-relimit-notes text{font:5.2px var(--sans);fill:#82796d;paint-order:stroke;stroke:var(--paper);stroke-width:2.3px;stroke-linejoin:round}
 
-/* Stock focus changes appearance only: keep every card and date in place. */
+/* Stock focus preserves original colors; emphasize with weight and opacity. */
 .vl-stock-focus-muted{opacity:.08!important;filter:grayscale(1)}.vl-stock-focus-muted .vl-stock-focus-muted{opacity:1!important}
-.vl-stock-focus-card>.vl-group-box{stroke:#b58b48!important;stroke-width:1.5;fill:color-mix(in srgb,#e8bd6d 14%,var(--paper))}
+.vl-stock-focus-card>.vl-group-box{stroke-width:1.5}
 .vl-stock-focus-active>.vl-name{font-weight:800;paint-order:stroke;stroke:var(--paper);stroke-width:1px;stroke-linejoin:round}
-.vl-stock-focus-active>rect:first-of-type{fill:#e4b45d26;stroke:#ae834a;stroke-width:.55}
 .vl-edge.vl-stock-focus-line,.vl-edge.vl-stock-focus-line:hover{opacity:.92!important;stroke-width:2.2!important}
 
 /* All non-continuous stock paths share one dashed style, including hover. */
