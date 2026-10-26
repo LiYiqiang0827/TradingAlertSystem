@@ -324,7 +324,7 @@ def live_push_event(updates):
                    'pct':row.get('price_change_ratio_pct',row.get('pct_chg')),'timestamp':stamp,
                    'volume':row.get('volume'),'amount':row.get('turnover',row.get('amount'))}
             (indices if kind=='snapshot_index' else quotes).append(quote)
-    if kinds&{'snapshot','limitperformance','zt','break'}:CACHE.delete('ladder-live-snapshot:v4:'+now.strftime('%Y%m%d'))
+    if kinds&{'snapshot','limitperformance','zt','break'}:CACHE.delete('ladder-live-snapshot:v5:'+now.strftime('%Y%m%d'))
     if 'snapshot_index' in kinds:CACHE.delete('ladder-live-index-quotes:v1:'+now.strftime('%Y%m%d'))
     live=live_ladder_snapshot()
     return {'updates':updates,'quotes':quotes,'indices':indices,'receivedAt':now.isoformat(),
@@ -1539,10 +1539,88 @@ def live_stock_chart(code,day):
         daily=historical_daily+[{'timestamp':int(datetime.datetime.strptime(day,'%Y%m%d').replace(tzinfo=datetime.timezone.utc).timestamp()*1000),'open':opening,'high':high,'low':low,'close':close,'amount':amount/1000,'volume':volume/100,'pct_chg':pct}]
         bars=historical_one+current_one;days=sorted({datetime.datetime.fromtimestamp(bar['timestamp']/1000,zone).strftime('%Y%m%d') for bar in bars})[-5:]
         bars=[bar for bar in bars if datetime.datetime.fromtimestamp(bar['timestamp']/1000,zone).strftime('%Y%m%d') in days]
-        facts={'code':code,'date':day,'close':close,'pct':pct,'openPct':(opening/float(prior_close)-1)*100 if prior_close else None,'amplitude':(high-low)/float(prior_close)*100 if prior_close else None,'amount':amount,'floatMarketCap':None,'totalMarketCap':None,'freeFloatTurnover':None,'limitTime':None}
+        facts={'code':code,'date':day,'close':close,'pct':pct,'openPct':(opening/float(prior_close)-1)*100 if prior_close else None,'amplitude':(high-low)/float(prior_close)*100 if prior_close else None,'amount':amount,'volume':volume,'floatMarketCap':None,'totalMarketCap':None,'freeFloatTurnover':None,'limitTime':None}
         live=live_ladder_snapshot();facts['limitTime']=live.get('stocks',{}).get(code,{}).get('time')
         return {'code':code,'date':day,'isLive':True,'updatedAt':now.isoformat(),'daily':daily,'oneMin':bars,'fifteenMin':historical_fifteen+current_fifteen,'suspendedDays':old_one['suspendedDays'],'previewFacts':facts,'sources':{'oneMin':'tdx_native_1min','fifteenMin':'tdx_native_15min','daily':'live_quote+native_minute'},'liveCoverage':{'oneMinBars':len(current_one),'fifteenMinBars':len(current_fifteen)}}
-    return cached_series(f'live-stock-hover:v4:{code}:{day}:{revision}',load,6)
+    payload=cached_series(f'live-stock-hover:v6:{code}:{day}:{revision}',load,6)
+    # Quote/fundamentals are cheap and refresh independently of the native-bar cache.
+    facts=live_stock_preview_facts(code,day,payload.get('previewFacts'))
+    daily=[{**bar,'turnover_rate_f':facts.get('freeFloatTurnover')} if datetime.datetime.fromtimestamp(bar['timestamp']/1000,datetime.timezone.utc).strftime('%Y%m%d')==day else bar for bar in payload['daily']]
+    return {**payload,'previewFacts':facts,'daily':daily}
+
+
+def live_stock_preview_facts(code,day,fallback=None):
+    """Use today's quote and official basics, or explicitly estimated prior-day shares."""
+    def number(value):
+        try:
+            value=float(value)
+            return value if math.isfinite(value) else None
+        except (TypeError,ValueError):return None
+    facts={'code':code,'date':day,'close':None,'pct':None,'openPct':None,'amplitude':None,'amount':None,'floatMarketCap':None,'totalMarketCap':None,'freeFloatTurnover':None,**(fallback or {}),'estimates':{},'isSealed':False,'sealAmount':None,'sealUpdatedAt':None,'sealSource':None}
+    live=live_ladder_snapshot();row=live.get('rows',{}).get(code,{}) if live.get('date')==day else {};detail=live.get('stocks',{}).get(code,{}) if row else {}
+    # Offline readiness can retire the ladder overlay while current seal facts
+    # are still needed. Reuse the same-day online observations independently.
+    if not row:
+        def load_observations():
+            import redis
+            client=redis.Redis(host='127.0.0.1',port=6380,decode_responses=True,socket_connect_timeout=.5,socket_timeout=2)
+            return {kind:read_online_close(kind,day,client) for kind in ('snapshot','limitperformance','zt')}
+        observations=cached_series('live-stock-observations:v1:'+day,load_observations,3)
+        quotes,quote_at,_=observations['snapshot'];performance,lp_at,_=observations['limitperformance'];pool,zt_at,_=observations['zt']
+        now=datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=8)));status=live_market_status()
+        def valid(at):
+            if not at:return False
+            local=datetime.datetime.fromtimestamp(at,now.tzinfo)
+            return local.strftime('%Y%m%d')==day and (status['phase']=='closed' or status['phase']=='recess' and local.hour>=11 or -5<=now.timestamp()-at<=120)
+        q=quotes.get(code,{}) if valid(quote_at) else {};lp=performance.get(code,{}) if valid(lp_at) else {};z=pool.get(code,{}) if valid(zt_at) else {}
+        options=[(at,value) for at,value in ((online_stamp(q.get('snapshot_timestamp')),number(q.get('last_price'))),(lp_at,number(lp.get('close_price'))),(zt_at,number(z.get('last_price')))) if at and value and value>0]
+        if options:
+            _,close=max(options,key=lambda item:item[0])
+            with sqlite3.connect(f'file:{BASIC_DB}?mode=ro',uri=True,timeout=3) as c:limit=c.execute('SELECT up_limit FROM tbl_cn_stk_limit WHERE trade_date=? AND ts_code=?',(day,code)).fetchone()
+            sealed=bool(limit and limit[0] and abs(close-float(limit[0]))<.005)
+            seal_options=[(at,value,source) for at,value,source in ((lp_at,number(lp.get('limit_order')),'kpl_performance'),(zt_at,number(z.get('seal_money')),'kpl_zt')) if at and value is not None]
+            seal_at,seal_value,seal_source=max(seal_options,key=lambda item:item[0]) if seal_options else (None,None,None)
+            row={'close':close,'pct_chg':q.get('price_change_ratio_pct',lp.get('pct_chg')),'pre_close':q.get('prev_price'),'daily_open':q.get('open_price'),'daily_high':q.get('high_price'),'daily_low':q.get('low_price'),'volume':q.get('volume'),'amount':q.get('turnover',lp.get('amount'))}
+            detail={'isSealed':sealed,'sealAmount':seal_value if sealed else None,'sealSource':seal_source if sealed else None,'sealUpdatedAt':datetime.datetime.fromtimestamp(seal_at,now.tzinfo).isoformat() if sealed and seal_at else None}
+    volume=number(row.get('volume')) if number(row.get('volume')) is not None else number(facts.get('volume'));price=number(row.get('close')) or number(facts.get('close'))
+    if row:
+        for target,source in (('close','close'),('pct','pct_chg'),('amount','amount')):
+            value=number(row.get(source))
+            if value is not None:facts[target]=value
+        base=number(row.get('pre_close'));opening=number(row.get('daily_open'));high=number(row.get('daily_high'));low=number(row.get('daily_low'))
+        if base and base>0:
+            if opening is not None:facts['openPct']=(opening/base-1)*100
+            if high is not None and low is not None:facts['amplitude']=(high-low)/base*100
+        facts.update(limitTime=detail.get('time') or facts.get('limitTime'),isSealed=bool(detail.get('isSealed')),sealAmount=number(detail.get('sealAmount')),sealUpdatedAt=detail.get('sealUpdatedAt'),sealSource=detail.get('sealSource'))
+    def load_basics():
+        with sqlite3.connect(f'file:{BASIC_DB}?mode=ro',uri=True,timeout=3) as c:
+            c.row_factory=sqlite3.Row
+            today=c.execute('SELECT * FROM tbl_cn_daily_basic WHERE trade_date=? AND ts_code=?',(day,code)).fetchone()
+            previous=c.execute('SELECT MAX(trade_date) FROM tbl_cn_day WHERE trade_date<?',(day,)).fetchone()[0]
+            prior=c.execute('SELECT b.*,d.vol AS prior_vol FROM tbl_cn_daily_basic b LEFT JOIN tbl_cn_day d ON d.trade_date=b.trade_date AND d.ts_code=b.ts_code WHERE b.trade_date=? AND b.ts_code=?',(previous,code)).fetchone() if previous else None
+        return {'today':dict(today) if today else {},'prior':dict(prior) if prior else {}}
+    basics=cached_series('live-stock-fundamentals:v1:'+day+':'+code+':'+database_revision((BASIC_DB,)),load_basics,300)
+    today=basics['today'];prior=basics['prior'];basis_date=prior.get('trade_date')
+    for field,column in (('floatMarketCap','circ_mv'),('totalMarketCap','total_mv'),('freeFloatTurnover','turnover_rate_f')):
+        exact=number(today.get(column))
+        if exact is not None:facts[field]=exact*(1 if field=='freeFloatTurnover' else 10000)
+    if price and price>0 and prior:
+        for field,share_column,mv_column in (('floatMarketCap','float_share','circ_mv'),('totalMarketCap','total_share','total_mv')):
+            if number(today.get(mv_column)) is not None:continue
+            shares=number(prior.get(share_column));old_cap=number(prior.get(mv_column));old_close=number(prior.get('close'))
+            if (shares is None or shares<=0) and old_cap is not None and old_close and old_close>0:shares=old_cap/old_close
+            if shares and shares>0:
+                facts[field]=price*shares*10000
+                facts['estimates'][field]={'basisDate':basis_date,'method':'previous_trading_day_shares_x_current_price'}
+    if number(today.get('turnover_rate_f')) is None and prior and volume is not None and volume>=0:
+        free_shares=number(prior.get('free_share'));denominator=free_shares*10000 if free_shares and free_shares>0 else None
+        if denominator is None:
+            prior_volume=number(prior.get('prior_vol'));prior_turnover=number(prior.get('turnover_rate_f'))
+            if prior_volume and prior_volume>0 and prior_turnover and prior_turnover>0:denominator=prior_volume*100/(prior_turnover/100)
+        if denominator and denominator>0:
+            facts['freeFloatTurnover']=volume/denominator*100
+            facts['estimates']['freeFloatTurnover']={'basisDate':basis_date,'method':'current_cumulative_shares_over_previous_free_shares'}
+    return facts
 
 
 def offline_ladder_ready(day):
@@ -1631,7 +1709,7 @@ def live_ladder_snapshot():
     empty.update(offlineReady=ready,mode='offline' if ready else 'close' if closed else 'live')
     if ready:return {**empty,'reason':'当日离线行情已就绪'}
     if status['phase'] not in ('trading','recess') and not closed:return empty
-    cache_key='ladder-live-snapshot:v4:'+day+(':'+database_revision((BASIC_DB,KPL_DB)) if closed else '')
+    cache_key='ladder-live-snapshot:v5:'+day+(':'+database_revision((BASIC_DB,KPL_DB)) if closed else '')
     cached=CACHE.get(cache_key)
     if cached is not None:return cached
     try:
@@ -1708,8 +1786,10 @@ def live_ladder_snapshot():
             if str(time).isdigit() and len(str(time))>=10:time=datetime.datetime.fromtimestamp(float(time),datetime.timezone(datetime.timedelta(hours=8))).strftime('%H:%M:%S')
             if re.fullmatch(r'\d{2}:\d{2}',str(time)):time=str(time)+':00'
             record={'trade_date':day,'ts_code':code,'name':name,'theme':theme,'lu_time':time,'close_price':price,'board_period':pattern}
-            rows[code]={'trade_date':day,'ts_code':code,'close':price,'pct_chg':pct,'up_limit':up,'daily_open':q.get('open_price'),'daily_high':high if high is not None else up if touched else price,'daily_low':q.get('low_price'),'daily_close':price,'pre_close':q.get('prev_price'),'down_limit':down}
-            details[code]={'pct':pct,'sealAmount':lp.get('limit_order',z.get('seal_money')),'time':str(time),'reason':lp.get('limit_reason') or z.get('limit_up_reason') or '', 'reasons':{},'marketReason':lp.get('limit_reason') or '', 'catalysts':{}}
+            rows[code]={'trade_date':day,'ts_code':code,'close':price,'pct_chg':pct,'up_limit':up,'daily_open':q.get('open_price'),'daily_high':high if high is not None else up if touched else price,'daily_low':q.get('low_price'),'daily_close':price,'pre_close':q.get('prev_price'),'down_limit':down,'volume':q.get('volume'),'amount':q.get('turnover') if q.get('turnover') is not None else lp.get('amount')}
+            seal_candidates=[(at,value,source) for at,value,source in ((lp_time,lp.get('limit_order'),'kpl_performance'),(zt_time,z.get('seal_money'),'kpl_zt')) if at and value is not None]
+            seal_at,seal_money,seal_source=max(seal_candidates,key=lambda item:item[0]) if seal_candidates else (None,None,None)
+            details[code]={'pct':pct,'isSealed':is_sealed,'sealAmount':seal_money if is_sealed else None,'sealUpdatedAt':datetime.datetime.fromtimestamp(seal_at,datetime.timezone(datetime.timedelta(hours=8))).isoformat() if is_sealed and seal_at else None,'sealSource':seal_source if is_sealed else None,'time':str(time),'reason':lp.get('limit_reason') or z.get('limit_up_reason') or '', 'reasons':{},'marketReason':lp.get('limit_reason') or '', 'catalysts':{}}
             if is_sealed:sealed[code]=record
             elif touched:failed[code]={**record,'pct':pct}
         latest=max(t for t in [zt_time,break_time,lp_time,quote_time] if t)
@@ -2606,7 +2686,10 @@ class Handler(SimpleHTTPRequestHandler):
             if u.path=="/api/stock-facts":
                 code=q.get("code",[""])[0];date=safe_date(q.get("date",[""])[0])
                 if not re.fullmatch(r"\d{6}\.(SH|SZ|BJ)",code):raise ValueError("股票代码无效")
-                meta=ladder_data_version();key=f"ladder-stock-facts:v2:{date}:{code}:{meta['ladderDataVersion']}"
+                meta=ladder_data_version()
+                if date==live_market_status()['date']:
+                    return self.send_json({**live_stock_preview_facts(code,date,ladder_stock_facts(date,code)),**meta})
+                key=f"ladder-stock-facts:v2:{date}:{code}:{meta['ladderDataVersion']}"
                 payload=CACHE.get(key)
                 if payload is None:
                     payload={**ladder_stock_facts(date,code),**meta};CACHE.set(key,payload,300)
