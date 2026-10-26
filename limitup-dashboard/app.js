@@ -1,4 +1,5 @@
 (() => {
+  const dashboardBootStarted=performance.now(),profileBoot=new URLSearchParams(location.search).has('profile'),apiProfile=[];
   const $ = (s, r=document) => r.querySelector(s);
   const initialDevicePixelRatio = window.devicePixelRatio || 1;
   const state = { date: '', dateLoadId: 0, dates: [], topicDates: {}, review: null, topic: null, stock: null, index: null, indexData: null, indexLoadId: 0, indicesPage: false, expandedTopics: new Set(), indicesExpanded: false, topicsCollapsed: false, navDisplayMode: localStorage.getItem('navDisplayMode') === 'board' ? 'board' : 'theme', collapsedBoardTiers: new Set([0,1,2,3,4,5]), charts: [], chartInstances: [], search: '', chartLayout: localStorage.getItem('chartLayout') || 'standard', uiScalePreference: localStorage.getItem('uiScalePreference') || 'auto', stockDatePreference: localStorage.getItem('stockDatePreference') || 'latest', latestMode: false, stockData: null, stockLoadId: 0 };
@@ -120,7 +121,23 @@
   const dailyAmplitudePct = stock => {const high=Number(stock.daily_high),low=Number(stock.daily_low),base=Number(stock.pre_close);return stock.daily_high!=null&&stock.daily_low!=null&&stock.pre_close!=null&&Number.isFinite(high)&&Number.isFinite(low)&&Number.isFinite(base)&&base!==0?`${((high-low)/base*100).toFixed(2)}%`:'—';};
   function canonicalStockCode(value){const raw=String(value||'').trim().toUpperCase(),code=raw.slice(0,6);if(/^\d{6}$/.test(code)){const sources=[...(state.review?.pool?.stocks||[]),...(state.review?.pool?.break_stocks||[]),...(state.review?.marketStats?.nonPromotedStocks||[]),...(state.review?.topics||[]).flatMap(topic=>topic.stocks||[])];const match=sources.find(stock=>String(stock.ts_code||'').slice(0,6)===code)?.ts_code;if(match)return String(match).toUpperCase();}return raw;}
   const tushareCode = value => canonicalStockCode(value);
-  async function api(path, opts) { const r=await fetch(path,opts); const data=await r.json(); if(!r.ok || data.error) throw new Error(data.error || `请求失败 ${r.status}`); return data; }
+  async function api(path,opts={}){
+    const requestAt=performance.now(),{timeoutMs=30000,...options}=opts,controller=new AbortController(),external=options.signal;
+    let timedOut=false;const abort=()=>controller.abort();
+    if(external?.aborted)abort();else external?.addEventListener('abort',abort,{once:true});
+    const timer=setTimeout(()=>{timedOut=true;controller.abort();},timeoutMs);
+    try{const response=await fetch(path,{...options,signal:controller.signal});let data;
+      try{data=await response.json();}catch(error){if(controller.signal.aborted)throw error;throw new Error(`服务返回异常（HTTP ${response.status}）`);}
+      if(!response.ok||data.error)throw new Error(data.error||`请求失败 ${response.status}`);return data;
+    }catch(error){if(timedOut)throw new Error('请求超时，请稍后重试');throw error;}
+    finally{clearTimeout(timer);external?.removeEventListener('abort',abort);if(profileBoot){apiProfile.push({path:path.split('?')[0],ms:Number((performance.now()-requestAt).toFixed(1))});if(apiProfile.length>24)apiProfile.shift();document.documentElement.dataset.apiProfile=JSON.stringify(apiProfile);}}
+  }
+  const reviewRequests=new Map();
+  function getReviewData(date){
+    if(reviewRequests.has(date))return reviewRequests.get(date);
+    const task=api('/api/review?date='+date).finally(()=>{if(reviewRequests.get(date)===task)reviewRequests.delete(date);});
+    reviewRequests.set(date,task);return task;
+  }
 
   let liveStatus=null,liveEnabled=false,liveRequestId=0,liveBusy=false,liveClockOffset=0;
   const liveClockFormat=new Intl.DateTimeFormat('sv-SE',{timeZone:'Asia/Shanghai',year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false});
@@ -794,7 +811,7 @@
   }
   function renderNav(){
     if(!isLivePage())disposeLiveIndexCharts();
-    const dailyCount=state.review?.topics?.length||0;
+    const dailyCount=state.review?.lightweight?(state.review.navigationTopicCount??'—'):(state.review?.topics?.length||0);
     const markup=`<div class="topic-group ladder-nav-group"><button class="topic-button overview-nav-button" type="button" data-ladder><span class="overview-nav-icon">梯</span><span class="topic-label">涨停天梯</span></button></div><div class="topic-group overview-nav-group"><button class="topic-button overview-nav-button" type="button" data-overview><span class="overview-nav-icon">${dailyCount}</span><span class="topic-label">每日总览</span></button></div><div class="topic-group index-nav-group"><button class="topic-button index-nav-button" type="button" data-indices><span class="index-nav-icon">指</span><span class="topic-label">重要指数</span></button></div>`;
     if(markup!==renderedNavMarkup){
       nav.innerHTML=markup;renderedNavMarkup=markup;
@@ -886,7 +903,7 @@
     loadMarketTurnover(state.date);
     loadIndicesOverviewCharts(state.date);
   }
-  async function openIndicesOverview(date=state.date,historyMode='push'){if(needsReviewDate(date)&&!await loadDate(date))return;syncBrowserRoute('indices',date,'','',historyMode);renderIndicesOverview();}
+  async function openIndicesOverview(date=history.state?.date||state.date,historyMode='push'){if(needsReviewDate(date)&&!await loadDate(date))return;syncBrowserRoute('indices',date,'','',historyMode);renderIndicesOverview();}
   async function navigateIndicesDate(step){const target=state.dates[state.dates.indexOf(state.date)+step];if(!target)return;syncBrowserRoute('indices',target);if(!await loadDate(target))return;renderIndicesOverview();}
   function moveIndex(step){if(!state.index)return;const list=indexSequence(),i=list.findIndex(item=>item.code===state.index.code),next=list[i+step];if(next)openIndex(next.code);}
   async function openIndex(code,date=state.date,historyMode='push'){
@@ -1543,9 +1560,14 @@
     for(const node of nodes)if(visibleDays.has(node.date))ladderThemeColor(node.theme);
     return new Map(ladderThemeColors);
   }
-  async function updateLadderReview(date,view){
-    if(state.date===date)return;
-    try{const review=await api(`/api/review?date=${date}`);if(ladderView!==view||history.state?.view!=='ladder'||view.endDay!==date)return;state.date=date;state.review=review;renderNav();}catch(error){console.warn('导航复盘数据稍后更新',error);}
+  async function updateLadderReview(date,view,pending=null){
+    if(state.date===date&&state.review?.date===date&&!state.review.lightweight)return;
+    const request=(view.reviewRequestId||0)+1;view.reviewRequestId=request;
+    try{const review=await (pending||getReviewData(date));if(ladderView!==view||view.reviewRequestId!==request||history.state?.view!=='ladder'||view.endDay!==date)return;
+      state.date=date;state.review=review;scheduleDailyPreload(review);renderNav();
+      $('#dataSourceLabel').textContent=`已连接 · 涨停行情库${review.analysisStatus==='待补充'?' · 题材分析待补充':''}`;
+      document.documentElement.dataset.navigationReview='ready';
+    }catch(error){if(ladderView===view)document.documentElement.dataset.navigationReview='deferred';console.warn('导航复盘数据稍后更新',error);}
   }
   async function openLadderDate(date,reuse=false){
     if(!state.dates.includes(date))return;
@@ -1617,7 +1639,7 @@
     $('#prevLadderDate').onclick=()=>moveLadderDate(-1);$('#nextLadderDate').onclick=()=>moveLadderDate(1);$('#openSettings').onclick=openSettings;updateLadderDateControls(endDay);renderNav();window.scrollTo(0,0);
     const view=ladderView={id,end,endDay,focusedStock:retainedStockFocus,stockOnly:retainedStockOnly,compactTheme:retainedStockTheme,compactThemes:retainedStockTheme?[retainedStockTheme]:[],legendStocksAll:retainedLegendStocks?.all??false,legendStockOverrides:retainedLegendStocks?.overrides||new Map(),low:end,high:end,loading:false,specifiedDayEnabled:true,specifiedDay:endDay,legendCollapsed:true,sealed:new Map(),outcomes:new Map(),links:new Map(),relimitLinks:new Map(),suspensionCarry:new Map(),unpromoted:new Map(),expandedUnpromoted:new Set(),aggregateInitialized:new Set(),hiddenLevels:new Set(),foldOtherThemes:true,foldBreakThemes:true,foldSecondFailed:true,foldHigherFailed:true,broken:new Map(),brokenDates:new Set(),previousDates:{},days:new Set(),data:null};
     setupLadderSearch(view);
-    await loadVerticalLadder('initial');if(ladderView!==view)return;
+    await loadVerticalLadder('initial');if(ladderView!==view||history.state?.view!=='ladder'||!$('#ladderChart'))return;if(view.data&&!document.documentElement.dataset.firstLadderMs)document.documentElement.dataset.firstLadderMs=(performance.now()-dashboardBootStarted).toFixed(1);
     const chart=$('#ladderChart');setupLadderCanvasPan(chart,view);chart.addEventListener('scroll',()=>{if(ladderView!==view)return;if(!view.dragging)view.updateLegend?.();prefetchLadderEdge(chart,view);},{passive:true});
     let oldWidth=$('#ladderChart').clientWidth;ladderResizeObserver=new ResizeObserver(()=>{if(ladderView!==view||!$('#ladderChart'))return;const width=$('#ladderChart').clientWidth;if(width!==oldWidth){oldWidth=width;paintLimitupLadder(view.data);if(!view.loading&&view.low>0&&view.days.size<ladderViewportSessions())loadVerticalLadder('older');}});ladderResizeObserver.observe($('#ladderChart'));
   }
@@ -1716,7 +1738,12 @@
       const themes=[...new Set(nodes.map(n=>n.theme))].sort((a,b)=>a.localeCompare(b,'zh-CN')).map(name=>({name}));
       const oldChart=$('#ladderChart'),oldSvg=oldChart.querySelector('svg'),oldLeft=oldChart.scrollLeft,oldScroll=oldChart.scrollTop,oldFirst=view.data?.dates[0],oldCount=view.data?.dates.length||0;
       view.data={live:view.live,dates:days,nodes,links,themes,relimitLinks:[...(view.relimitLinks||new Map()).values()].filter(edge=>edge.targetDate<=view.endDay),brokenStocks:[...view.broken.values()].filter(stock=>stock.date<=view.endDay),previousDates:{...view.previousDates},sealedStocks:[...chainNodes.values()],unpromotedStocks:[...view.unpromoted.values()].filter(stock=>stock.date<=view.endDay).map(stock=>({...stock,originalTheme:stock.theme,theme:chainNodes.get(stock.sourceId)?.theme||stock.theme})),suspensionCarry:[...view.suspensionCarry.values()].filter(carry=>carry.targetDate<=view.endDay).map(carry=>({...carry,theme:chainNodes.get(carry.targetId)?.theme||chainNodes.get(carry.sourceId)?.theme||carry.theme}))};if(anchor==='end')view.visibleDays=days.slice(-ladderViewportSessions());paintLimitupLadder(view.data);
-      const chart=$('#ladderChart');if(anchor==='end')chart.scrollLeft=chart.scrollWidth-chart.clientWidth;else if(oldSvg){const added=days.indexOf(oldFirst),column=(Number(chart.querySelector('svg').getAttribute('width'))-50)/days.length;chart.scrollLeft=oldLeft+(added>0&&days.length>oldCount?added*column:0);chart.scrollTop=oldScroll;}chart.dataset.loadedSessions=String(view.days.size);chart.dataset.renderedSessions=String(days.length);chart.dataset.cacheSource=view.cacheSource||'';chart.dataset.dataVersion=view.dataVersion||'';view.updateLegend?.();updateLiveLadderLabel(view);syncLivePushConnection();
+      const chart=$('#ladderChart');if(anchor==='end')chart.scrollLeft=chart.scrollWidth-chart.clientWidth;else if(oldSvg){const added=days.indexOf(oldFirst),column=(Number(chart.querySelector('svg').getAttribute('width'))-50)/days.length;chart.scrollLeft=oldLeft+(added>0&&days.length>oldCount?added*column:0);chart.scrollTop=oldScroll;}chart.dataset.loadedSessions=String(view.days.size);chart.dataset.renderedSessions=String(days.length);chart.dataset.cacheSource=view.cacheSource||'';chart.dataset.dataVersion=view.dataVersion||'';
+      if(state.review?.lightweight||state.review?.date!==view.endDay){
+        state.date=view.endDay;state.review={date:view.endDay,topics:[],lightweight:true,navigationTopicCount:new Set([...view.sealed.values()].filter(stock=>stock.date===view.endDay).map(stock=>stock.theme)).size};
+        renderNav();$('#dataSourceLabel').textContent='已连接 · 涨停行情库';
+      }
+      view.updateLegend?.();updateLiveLadderLabel(view);syncLivePushConnection();
   }
   function prefetchLadderEdge(host,view){
     if(!host||ladderView!==view||view.loading||!view.data||view.low<=0||history.state?.view!=='ladder')return;
@@ -1777,10 +1804,17 @@
     const classes=[...new Set([...(fresh.getAttribute('class')||'').split(/\s+/).filter(Boolean),...stateClasses])].join(' ');
     if(classes){if(existing.getAttribute('class')!==classes)existing.setAttribute('class',classes);}else existing.removeAttribute('class');
   }
+  function ladderChildMatcher(old,keyFor){
+    const keyed=new Map(),plain=new Map(),offset=new Map();
+    for(const node of old){const key=keyFor(node);if(key)keyed.set(key,node);else{const kind=node.nodeType+':'+node.nodeName;if(!plain.has(kind))plain.set(kind,[]);plain.get(kind).push(node);}}
+    return (node,used)=>{const key=keyFor(node);if(key){const prior=keyed.get(key);return prior&&!used.has(prior)?prior:null;}
+      const kind=node.nodeType+':'+node.nodeName,index=offset.get(kind)||0;offset.set(kind,index+1);return plain.get(kind)?.[index]||null;
+    };
+  }
   function patchLadderChildren(existing,fresh){
-    const old=[...existing.childNodes],keyed=new Map(old.map(node=>[ladderDOMKey(node),node]).filter(([key])=>key)),used=new Set();
+    const old=[...existing.childNodes],match=ladderChildMatcher(old,ladderDOMKey),used=new Set();
     for(const [index,newChild] of [...fresh.childNodes].entries()){
-      const key=ladderDOMKey(newChild);let child=key?keyed.get(key):old.find(node=>!used.has(node)&&!ladderDOMKey(node)&&node.nodeType===newChild.nodeType&&node.nodeName===newChild.nodeName);
+      let child=match(newChild,used);
       if(!child){child=ladderCardFragment(newChild);existing.insertBefore(child,existing.childNodes[index]||null);}
       else{if(existing.childNodes[index]!==child)existing.insertBefore(child,existing.childNodes[index]||null);patchLadderDOM(child,newChild);}
       used.add(child);
@@ -1811,9 +1845,9 @@
     if(existing.nodeType!==Node.ELEMENT_NODE){existing.nodeValue=fresh.nodeValue;return;}
     for(const attribute of [...existing.attributes])if(!fresh.hasAttribute(attribute.name))existing.removeAttribute(attribute.name);
     for(const attribute of fresh.attributes)if(existing.getAttribute(attribute.name)!==attribute.value)existing.setAttribute(attribute.name,attribute.value);
-    const key=node=>node.nodeType!==Node.ELEMENT_NODE?'':node.hasAttribute('data-vl-legend-entry')?'entry:'+node.dataset.vlLegendEntry:node.hasAttribute('data-vl-legend-stock')?'stock:'+node.dataset.vlLegendStock:node.hasAttribute('data-vl-theme')?'theme:'+node.dataset.vlTheme:node.tagName==='SECTION'?'tier:'+node.getAttribute('aria-label'):node.hasAttribute('data-vl-row-level')?'row:'+node.dataset.vlRowLevel:'',old=[...existing.childNodes],keyed=new Map(old.map(node=>[key(node),node]).filter(([key])=>key)),used=new Set();
+    const key=node=>node.nodeType!==Node.ELEMENT_NODE?'':node.hasAttribute('data-vl-legend-entry')?'entry:'+node.dataset.vlLegendEntry:node.hasAttribute('data-vl-legend-stock')?'stock:'+node.dataset.vlLegendStock:node.hasAttribute('data-vl-theme')?'theme:'+node.dataset.vlTheme:node.tagName==='SECTION'?'tier:'+node.getAttribute('aria-label'):node.hasAttribute('data-vl-row-level')?'row:'+node.dataset.vlRowLevel:'',old=[...existing.childNodes],match=ladderChildMatcher(old,key),used=new Set();
     for(const [index,newChild] of [...fresh.childNodes].entries()){
-      const newKey=key(newChild);let child=newKey?keyed.get(newKey):old.find(node=>!used.has(node)&&!key(node)&&node.nodeType===newChild.nodeType&&node.nodeName===newChild.nodeName);
+      let child=match(newChild,used);
       if(!child){child=newChild.cloneNode(true);existing.insertBefore(child,existing.childNodes[index]||null);}else{if(existing.childNodes[index]!==child)existing.insertBefore(child,existing.childNodes[index]||null);patchLadderLegend(child,newChild);}used.add(child);
     }
     for(const child of old)if(!used.has(child))child.remove();
@@ -1902,7 +1936,7 @@
     if(compactLayout){
       const keepTheme=theme=>compactThemes.size?compactThemes.has(theme):boardThemes.has(theme),byId=new Map((fullData.sealedStocks||[]).map(node=>[node.id,node])),present=new Set(data.nodes.map(node=>node.id)),restartIds=new Set();
       const brokenById=new Map((fullData.brokenStocks||[]).map(stock=>[stock.id,stock]));
-      const restarts=(fullData.relimitLinks||[]).filter(edge=>edge.sessions>=1&&edge.sessions<=10).filter(edge=>{const source=byId.get(edge.source)||brokenById.get(edge.source),target=byId.get(edge.target);return source&&target&&days.includes(source.date)&&days.includes(target.date)&&(view.stockOnly?source.code===view.focusedStock&&target.code===view.focusedStock:view.focusedStock?source.code===view.focusedStock&&target.code===view.focusedStock||keepTheme(source.theme)&&keepTheme(target.theme):keepTheme(source.theme)||keepTheme(target.theme));});
+      const restarts=(fullData.relimitLinks||[]).filter(edge=>edge.sessions>=1&&edge.sessions<=10).filter(edge=>{const source=byId.get(edge.source)||brokenById.get(edge.source),target=byId.get(edge.target);return source&&target&&days.includes(source.date)&&days.includes(target.date)&&(view.stockOnly?source.code===view.focusedStock&&target.code===view.focusedStock:keepTheme(source.theme)||keepTheme(target.theme));});
       for(const edge of restarts)if(brokenById.has(edge.source)&&!data.brokenStocks.some(stock=>stock.id===edge.source))data.brokenStocks.push(brokenById.get(edge.source));
       for(const edge of restarts)for(const id of [edge.source,edge.target]){if(!byId.has(id))continue;restartIds.add(id);if(!present.has(id)){data.nodes.push({...byId.get(id),representative:false,firstCount:0,members:[]});present.add(id);}}
       const sealedIds=new Set((data.sealedStocks||[]).map(node=>node.id));for(const id of restartIds)if(!sealedIds.has(id))data.sealedStocks.push(byId.get(id));
@@ -2083,7 +2117,7 @@
     if(view.rowViewportAnchor){const anchor=view.rowViewportAnchor,row=rows.find(row=>row.level===anchor.level);view.rowViewportAnchor=null;if(row)host.scrollTop=28+row.y+Math.min(anchor.offset,Math.max(0,row.height-1));}
     if(!patchPaint)setupLadderDateSlider(host.querySelector('.vl-board-header'),columns);
     markPaint('layout');
-    const legend=$('#ladderLegend'),selectedThemes=new Set(compactThemes.size?compactThemes:[view.focusedTheme].filter(Boolean));let navigating=false;
+    const legend=$('#ladderLegend'),selectedThemes=new Set(compactThemes.size?compactThemes:[view.focusedTheme].filter(Boolean));let navigating=false,legendAppearanceSignature='';
     let stockFocusIndex=null;
     const stockCodeFromId=id=>String(id||'').split(':')[1]||'';
     function stockCodes(element){
@@ -2111,9 +2145,11 @@
       const started=performance.now(),next=view.focusedStock===code?'':code;
       const stock=[...(fullData.sealedStocks||[]),...(fullData.unpromotedStocks||[]),...(fullData.brokenStocks||[])].find(stock=>stock.code===code);
       theme=theme||stock?.theme||view.compactTheme;
+      const reuseLayout=compactLayout&&!view.stockOnly&&!minBoard&&compactThemes.size===1&&compactThemes.has(theme);
       if(!compactLayout)view.normalViewport={left:host.scrollLeft,top:host.scrollTop};
       view.stockOnly=false;view.focusedStock=next;view.minBoard=0;view.compactThemes=theme?[theme]:[];view.compactTheme=theme;view.focusedTheme='';view.expandOnCompact=Boolean(theme);
-      const left=host.scrollLeft;paintLimitupLadder(fullData);host.scrollLeft=left;host.scrollTop=0;view.updateLegend?.();host.dataset.stockFocusMs=(performance.now()-started).toFixed(1);
+      if(reuseLayout){view.expandOnCompact=false;applyThemeFocus();view.updateLegend?.();host.dataset.stockFocusMode='styles';host.dataset.stockFocusMs=(performance.now()-started).toFixed(1);return;}
+      host.dataset.stockFocusMode='layout';const left=host.scrollLeft;paintLimitupLadder(fullData);host.scrollLeft=left;host.scrollTop=0;view.updateLegend?.();host.dataset.stockFocusMs=(performance.now()-started).toFixed(1);
     }
     function focusLegendStock(stock){
       if(view.singleClickTimer){clearTimeout(view.singleClickTimer);view.singleClickTimer=0;}
@@ -2310,10 +2346,14 @@
       // Four-board themes stay emphasized across their whole path, including lower tiers.
       // Use the visible dates so panning does not retain an off-screen historical leader.
       themeColors=ladderDistinctThemeColors(fullData.sealedStocks||allSealed,visibleDays);view.themeColors=new Map(themeColors);const strongThemes=new Set((fullData.sealedStocks||allSealed).filter(node=>node.status==='sealed'&&node.board>=4&&visibleDays.has(node.date)).map(node=>node.theme));
-      host.querySelectorAll('[data-vl-colored-theme]').forEach(element=>element.style.setProperty('--ladder-theme-color',themeColor(element.dataset.vlColoredTheme)));
-      host.querySelectorAll('[data-vl-line-theme]').forEach(element=>element.setAttribute('stroke',themeColor(element.dataset.vlLineTheme)));
-      host.querySelectorAll('[data-vl-box-theme]').forEach(element=>element.classList.toggle('vl-theme-emphasis',strongThemes.has(element.dataset.vlBoxTheme)));
-      host.querySelectorAll('[data-vl-line-theme]').forEach(element=>element.classList.toggle('vl-theme-emphasis',strongThemes.has(element.dataset.vlLineTheme)));
+      const appearance=JSON.stringify([[...visibleDays].sort(),[...themeColors],[...strongThemes].sort()]);
+      if(appearance!==legendAppearanceSignature){
+        legendAppearanceSignature=appearance;
+        host.querySelectorAll('[data-vl-colored-theme]').forEach(element=>element.style.setProperty('--ladder-theme-color',themeColor(element.dataset.vlColoredTheme)));
+        host.querySelectorAll('[data-vl-line-theme]').forEach(element=>{element.setAttribute('stroke',themeColor(element.dataset.vlLineTheme));element.classList.toggle('vl-theme-emphasis',strongThemes.has(element.dataset.vlLineTheme));});
+        host.querySelectorAll('[data-vl-box-theme]').forEach(element=>element.classList.toggle('vl-theme-emphasis',strongThemes.has(element.dataset.vlBoxTheme)));
+        host.dataset.appearancePasses=String(Number(host.dataset.appearancePasses||0)+1);
+      }else host.dataset.appearanceSkipped=String(Number(host.dataset.appearanceSkipped||0)+1);
       const range=[...visibleDays].sort(),firstDay=range[0]||view.endDay,lastDay=range.at(-1)||view.endDay,rangeLabel=fmtDate(firstDay)+'至'+fmtDate(lastDay),shortRange=firstDay.slice(4,6)+'/'+firstDay.slice(6)+'—'+lastDay.slice(4,6)+'/'+lastDay.slice(6),stats=new Map([...visibleThemes].map(theme=>[theme,{name:theme,count:0,highest:0,codes:new Set()}]));
       for(const node of fullData.sealedStocks||[]){const item=stats.get(node.theme);if(!item)continue;if(visibleDays.has(node.date)){item.highest=Math.max(item.highest,node.board);if(node.status==='sealed')item.codes.add(node.code);}}
       for(const stock of fullData.unpromotedStocks||[]){if(!visibleDays.has(stock.date))continue;if(!stats.has(stock.theme))stats.set(stock.theme,{name:stock.theme,count:0,highest:1,codes:new Set()});stats.get(stock.theme).codes.add(stock.code);}
@@ -2371,7 +2411,7 @@
     }
     syncBrowserRoute('ladder',state.date);renderLimitupLadder();
   }
-  function openHome(date=state.date,historyMode='push'){if(needsReviewDate(date)){syncBrowserRoute('home',date,'','',historyMode);loadDate(date);return;}syncBrowserRoute('home',date,'','',historyMode);state.topic=null;state.stock=null;state.index=null;state.indexData=null;renderHome();}
+  function openHome(date=history.state?.date||state.date,historyMode='push'){if(needsReviewDate(date)){syncBrowserRoute('home',date,'','',historyMode);loadDate(date);return;}syncBrowserRoute('home',date,'','',historyMode);state.topic=null;state.stock=null;state.index=null;state.indexData=null;renderHome();}
   function goBackInApp(fallbackView='home',topic=''){if(history.state?.tradingAlert&&history.state.hasAppParent){history.back();return;}if(fallbackView==='topic'&&topic)openTopic(topic);else if(fallbackView==='indices')openIndicesOverview();else openHome();}
   async function restoreBrowserRoute(route){if(route?.view==='live'){await refreshMarketStatus();if(liveEnabled){livePageShell();await refreshLivePage();return;}syncBrowserRoute('home',state.date,'','','replace');}const date=state.dates.includes(route?.date)?route.date:state.date;if(needsReviewDate(date)&&!await loadDate(date))return;if(route?.view==='ladder'){renderLimitupLadder();return;}if(route?.view==='indices'){renderIndicesOverview();return;}if(route?.view==='index'&&route.index&&indexSequence().some(item=>item.code===route.index)){await openIndex(route.index,date,'replace');return;}if(route?.view==='topic'&&route.topic){state.stock=null;state.index=null;renderNav();if(state.review.topics.some(t=>t.name===route.topic))renderTopic(route.topic);else renderTopicNoData(route.topic);return;}if(route?.view==='stock'&&route.stock){const stock=resolveTopicStock(route.topic,route.stock,route.outcome)||( !route.topic ? navigableStocks().find(s=>s.code===route.stock) : null );if(stock){await selectStock(stock.topic,stock.code,{historyMode:'none',outcome:route.outcome});return;}}state.topic=null;state.stock=null;state.index=null;renderHome();}
   function topicNavigationOrder(){return visibleTopics().map(topic=>topic.name);}
@@ -2540,7 +2580,7 @@
   async function runAnalysis(){if(!pendingSelection)return;const b=$('#runAnalysis');b.disabled=true;b.textContent='正在整理…';try{const d=await api('/api/analyze',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({date:state.date,topic:pendingSelection.topic,code:pendingSelection.code,selection:pendingSelection.text,question:$('#analysisQuestion').value})});const stock=d.stock||{};const list=(d.stocks||[]).map(x=>`${x.name}：${x.reason}；${x.bridge}`).join('<br>');$('#analysisResult').innerHTML=`<div class="insight-block"><h4>选中的内容</h4><div class="insight-quote">${esc(d.selected)}</div></div>${d.question?`<div class="insight-block"><h4>你的问题</h4><p>${esc(d.question)}</p></div>`:''}<div class="insight-block"><h4>当日题材催化</h4><p>${esc(d.catalyst||'Neo4j 未提供题材总述')}</p></div><div class="insight-block"><h4>${stock.name?'个股逻辑桥梁':'题材内涨停个股'}</h4><p>${stock.name?`<b>${esc(stock.reason||'')}</b><br>${esc(stock.bridge||'')}`:list||'没有匹配到个股记录'}</p></div>${stock.name?`<div class="insight-block"><h4>判断边界</h4><p>${esc(stock.caveat||stock.confidence||'需要结合盘中信息进一步确认')}</p></div>`:''}<div class="insight-block"><h4>数据模式</h4><p>${esc(d.disclaimer)}</p></div>`;}catch(e){$('#analysisResult').innerHTML=`<div class="empty-state">分析失败：${esc(e.message)}</div>`;}finally{b.disabled=false;b.innerHTML='生成结构化分析 <span>→</span>';}}
   const formatCalendarDate=date=>date?`${date.slice(0,4)}/${date.slice(4,6)}/${date.slice(6,8)}`:'';
   const datePickerTriggerMarkup=(id,className,date=state.date)=>`<button id="${id}" class="${className} topbar-calendar-trigger date-picker-trigger" data-date-picker-trigger type="button" aria-label="选择复盘日期" aria-haspopup="dialog" aria-expanded="false"><span class="date-trigger-label">${formatCalendarDate(date)}</span><span class="nav-calendar-icon" aria-hidden="true">▦</span></button>`;
-  let calendarMonth='';
+  let calendarMonth='';const topicCalendarRequests=new Map(),topicCalendarLoadedAt=new Map();
   function closeDatePicker(){if(activeDatePickerTrigger)activeDatePickerTrigger.setAttribute('aria-expanded','false');datePicker.hidden=true;activeDatePickerTrigger=null;}
   function datePickerSelectedDate(trigger=activeDatePickerTrigger){
     return (trigger?.id==='ladderSpecifiedDay'?ladderView?.specifiedDay:trigger?.id==='ladderDatePickerTrigger'?ladderView?.endDay:state.date)||state.dates.at(-1);
@@ -2555,7 +2595,9 @@
     if(top+datePicker.offsetHeight>window.innerHeight-8){top=Math.max(8,rect.top-datePicker.offsetHeight-7);datePicker.style.top=`${top}px`;}
     if(trigger.id==='topicDatePickerTrigger'){
       const topic=state.topic;
-      if(topic&&!state.topicDates[topic])api(`/api/topic-dates?topic=${encodeURIComponent(topic)}`).then(result=>{state.topicDates[topic]=new Set(result.dates||[]);if(activeDatePickerTrigger?.id==='topicDatePickerTrigger'&&state.topic===topic)renderDatePicker();}).catch(()=>{state.topicDates[topic]=new Set([state.date]);if(activeDatePickerTrigger?.id==='topicDatePickerTrigger'&&state.topic===topic)renderDatePicker();toast('暂时无法读取该题材的有记录日期');});
+      if(topic&&(!state.topicDates[topic]||Date.now()-(topicCalendarLoadedAt.get(topic)||0)>30000)&&!topicCalendarRequests.has(topic)){
+        const request=api(`/api/topic-dates?topic=${encodeURIComponent(topic)}`).then(result=>{state.topicDates[topic]=new Set(result.dates||[]);topicCalendarLoadedAt.set(topic,Date.now());if(activeDatePickerTrigger?.id==='topicDatePickerTrigger'&&state.topic===topic)renderDatePicker();}).catch(()=>{if(!state.topicDates[topic])state.topicDates[topic]=new Set([state.date]);if(activeDatePickerTrigger?.id==='topicDatePickerTrigger'&&state.topic===topic)renderDatePicker();toast('暂时无法读取该题材的有记录日期');}).finally(()=>topicCalendarRequests.delete(topic));topicCalendarRequests.set(topic,request);
+      }
     }
   }
   function renderDatePicker(){
@@ -2577,7 +2619,7 @@
     datePicker.innerHTML=`<div class="calendar-head"><button type="button" class="calendar-month-nav" data-month="-1" aria-label="上个月" ${monthValue<=minMonth?'disabled':''}>‹</button><strong>${year}年${month}月</strong><button type="button" class="calendar-month-nav" data-month="1" aria-label="下个月" ${monthValue>=maxMonth?'disabled':''}>›</button></div><div class="calendar-weekdays"><span>一</span><span>二</span><span>三</span><span>四</span><span>五</span><span>六</span><span>日</span></div><div class="calendar-grid">${cells.join('')}</div>${dayNavigation}${ladderMode?'':`<div class="calendar-footer">${latestButton}</div>`}`;
   }
   async function chooseReviewDate(date){if(!state.dates.includes(date))return;const pickerId=activeDatePickerTrigger?.id;closeDatePicker();if(pickerId==='ladderSpecifiedDay'){ladderView?.setSpecifiedLegendDate?.(date);return;}if(pickerId==='ladderDatePickerTrigger'){await openLadderDate(date);return;}if(state.indicesPage){await openIndicesOverview(date);return;}if(state.topic){const topic=state.topic;syncBrowserRoute('topic',date,topic);if(!await loadDate(date))return;renderNav();if(state.review.topics.some(item=>item.name===topic))renderTopic(topic);else renderTopicNoData(topic);return;}syncBrowserRoute('home',date);await loadDate(date);}
-  function needsReviewDate(date){return date!==state.date||state.review?.date!==date;}
+  function needsReviewDate(date){return date!==state.date||state.review?.date!==date||Boolean(state.review?.lightweight);}
   async function loadDate(date,{renderHomePage=true}={}){
     const requestId=++state.dateLoadId,route=location.href;
     state.date=date;state.stockLoadId++;state.indexLoadId++;
@@ -2585,7 +2627,7 @@
     document.querySelectorAll('.date-trigger-label').forEach(label=>label.textContent=formatCalendarDate(date));
     content.innerHTML='<div class="loading"><span class="spinner"></span><p>正在读取每日分析与市场数据…</p></div>';
     try{
-      const review=await api(`/api/review?date=${date}`);
+      const review=await getReviewData(date);
       if(!current())return false;
       if(review.date!==date)throw new Error('返回的行情日期与所选日期不一致');
       state.review=review;scheduleDailyPreload(review);
@@ -2597,7 +2639,14 @@
       $('#dataSourceLabel').textContent='数据读取失败';return false;
     }
   }
-  async function start(){setupLiveNavigation();setupIndexHover();try{const {dates,onlineLadderDate}=await api('/api/dates');state.dates=dates.slice().sort();if(routeFromLocation().view==='ladder'&&onlineLadderDate&&!state.dates.includes(onlineLadderDate))state.dates.push(onlineLadderDate);state.dates.sort();if(!state.dates.length)throw new Error('涨停行情数据库中没有可展示的交易日数据');const incoming=routeFromLocation(),defaultDate=state.dates[state.dates.length-1],initialDate=state.dates.includes(incoming.date)?incoming.date:defaultDate,initialRoute={tradingAlert:true,view:incoming.view||'home',date:initialDate,topic:incoming.topic||'',stock:incoming.stock||'',outcome:incoming.outcome||'',index:incoming.index||'',ladderEnd:incoming.ladderEnd||''};calendarMonth=initialDate.slice(0,6);renderDatePicker();syncBrowserRoute(initialRoute.view,initialRoute.date,initialRoute.topic,initialRoute.stock,'replace',initialRoute.outcome,initialRoute.index,initialRoute.ladderEnd);if(await loadDate(initialDate,{renderHomePage:initialRoute.view==='home'})&&initialRoute.view!=='home')await restoreBrowserRoute(initialRoute);window.addEventListener('popstate',event=>restoreBrowserRoute(event.state?.tradingAlert?event.state:routeFromLocation()));}catch(e){content.innerHTML=`<div class="empty-state">${esc(e.message)}</div>`}document.body.append(datePicker);document.addEventListener('click',event=>{const trigger=event.target.closest('[data-date-picker-trigger]');if(trigger){if(activeDatePickerTrigger===trigger&&!datePicker.hidden)closeDatePicker();else openDatePicker(trigger);}});datePicker.onclick=async event=>{const button=event.target.closest('button');if(!button)return;if(button.dataset.month){const y=Number(calendarMonth.slice(0,4)),m=Number(calendarMonth.slice(4,6))+Number(button.dataset.month),d=new Date(Date.UTC(y,m-1,1));calendarMonth=`${d.getUTCFullYear()}${String(d.getUTCMonth()+1).padStart(2,'0')}`;renderDatePicker();return;}if(button.dataset.latest){const topicMode=activeDatePickerTrigger?.id==='topicDatePickerTrigger',dates=topicMode?Array.from(state.topicDates[state.topic]||[]).sort():state.dates,target=dates[dates.length-1];if(target)await chooseReviewDate(target);return;}if(button.dataset.date)await chooseReviewDate(button.dataset.date);};document.addEventListener('mousedown',event=>{if(!event.target.closest('[data-date-picker-trigger]')&&!datePicker.contains(event.target))closeDatePicker();});document.addEventListener('keydown',event=>{if(event.key==='Escape'&&!datePicker.hidden)closeDatePicker();});$('#refreshBtn').onclick=async()=>{if(isLivePage()){await refreshLivePage();return;}const wasLadder=history.state?.view==='ladder',wasIndices=state.indicesPage;if(!await loadDate(state.date))return;if(wasLadder)renderLimitupLadder();else if(wasIndices)renderIndicesOverview();};$('.collapse').onclick=()=>{const collapsed=!appShell.classList.contains('nav-collapsed');setNavigationCollapsed(collapsed);if(window.innerWidth<=700)$('.sidebar').classList.toggle('open',!collapsed);};$('#navReopen').onclick=()=>{setNavigationCollapsed(false);if(window.innerWidth<=700)$('.sidebar').classList.add('open');};setupSettings();setupSelection();}
+  async function start(){setupLiveNavigation();setupIndexHover();try{const {dates,onlineLadderDate}=await api('/api/dates');state.dates=dates.slice().sort();if(routeFromLocation().view==='ladder'&&onlineLadderDate&&!state.dates.includes(onlineLadderDate))state.dates.push(onlineLadderDate);state.dates.sort();if(!state.dates.length)throw new Error('涨停行情数据库中没有可展示的交易日数据');const incoming=routeFromLocation(),defaultDate=state.dates[state.dates.length-1],initialDate=state.dates.includes(incoming.date)?incoming.date:defaultDate,initialRoute={tradingAlert:true,view:incoming.view||'home',date:initialDate,topic:incoming.topic||'',stock:incoming.stock||'',outcome:incoming.outcome||'',index:incoming.index||'',ladderEnd:incoming.ladderEnd||''};calendarMonth=initialDate.slice(0,6);renderDatePicker();syncBrowserRoute(initialRoute.view,initialRoute.date,initialRoute.topic,initialRoute.stock,'replace',initialRoute.outcome,initialRoute.index,initialRoute.ladderEnd);if(initialRoute.view==='ladder'){
+      const day=state.dates.includes(initialRoute.ladderEnd)?initialRoute.ladderEnd:initialDate;
+      state.date=day;state.review={date:day,topics:[],lightweight:true};renderNav();
+      syncBrowserRoute('ladder',day,'','','replace','','',day);
+      document.documentElement.dataset.navigationReview='loading';
+      const pending=getReviewData(day);pending.catch(()=>{});
+      await renderLimitupLadder();if(ladderView)updateLadderReview(day,ladderView,pending);
+    }else if(await loadDate(initialDate,{renderHomePage:initialRoute.view==='home'})&&initialRoute.view!=='home')await restoreBrowserRoute(initialRoute);window.addEventListener('popstate',event=>restoreBrowserRoute(event.state?.tradingAlert?event.state:routeFromLocation()));}catch(e){content.innerHTML=`<div class="empty-state">${esc(e.message)}</div>`}document.body.append(datePicker);document.addEventListener('click',event=>{const trigger=event.target.closest('[data-date-picker-trigger]');if(trigger){if(activeDatePickerTrigger===trigger&&!datePicker.hidden)closeDatePicker();else openDatePicker(trigger);}});datePicker.onclick=async event=>{const button=event.target.closest('button');if(!button)return;if(button.dataset.month){const y=Number(calendarMonth.slice(0,4)),m=Number(calendarMonth.slice(4,6))+Number(button.dataset.month),d=new Date(Date.UTC(y,m-1,1));calendarMonth=`${d.getUTCFullYear()}${String(d.getUTCMonth()+1).padStart(2,'0')}`;renderDatePicker();return;}if(button.dataset.latest){const topicMode=activeDatePickerTrigger?.id==='topicDatePickerTrigger',dates=topicMode?Array.from(state.topicDates[state.topic]||[]).sort():state.dates,target=dates[dates.length-1];if(target)await chooseReviewDate(target);return;}if(button.dataset.date)await chooseReviewDate(button.dataset.date);};document.addEventListener('mousedown',event=>{if(!event.target.closest('[data-date-picker-trigger]')&&!datePicker.contains(event.target))closeDatePicker();});document.addEventListener('keydown',event=>{if(event.key==='Escape'&&!datePicker.hidden)closeDatePicker();});$('#refreshBtn').onclick=async()=>{if(isLivePage()){await refreshLivePage();return;}const wasLadder=history.state?.view==='ladder',wasIndices=state.indicesPage;if(!await loadDate(state.date))return;if(wasLadder)renderLimitupLadder();else if(wasIndices)renderIndicesOverview();};$('.collapse').onclick=()=>{const collapsed=!appShell.classList.contains('nav-collapsed');setNavigationCollapsed(collapsed);if(window.innerWidth<=700)$('.sidebar').classList.toggle('open',!collapsed);};$('#navReopen').onclick=()=>{setNavigationCollapsed(false);if(window.innerWidth<=700)$('.sidebar').classList.add('open');};setupSettings();setupSelection();}
   function fitUiScale(){const browserZoom=(window.devicePixelRatio||initialDevicePixelRatio)/initialDevicePixelRatio,layoutWidth=window.innerWidth*browserZoom,automatic=state.chartLayout==='grid'?1:Math.max(1,Math.min(1.4,layoutWidth/1440)),multiplier=state.uiScalePreference==='auto'?1:Number(state.uiScalePreference)||1,scale=Math.max(1,Math.min(1.8,automatic*multiplier));document.documentElement.style.zoom=String(scale);}
   window.addEventListener('resize',fitUiScale,{passive:true});fitUiScale();
   start();

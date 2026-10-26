@@ -10,9 +10,10 @@ import datetime as dt
 import json
 import threading
 import time
+from cache_singleflight import KeyedLocks
 
 _CACHE_VERSION = 1
-_locks = tuple(threading.RLock() for _ in range(32))
+_locks = KeyedLocks()
 _memory = OrderedDict()
 _memory_lock = threading.RLock()
 _memory_bytes = 0
@@ -77,7 +78,7 @@ def _remember(key, record):
 def read_basis(cache, code, cutoff, revision_fn, loader):
     global _memory_bytes
     key = f'stock-daily-basis:v{_CACHE_VERSION}:{code}'
-    with _locks[hash(code) % len(_locks)]:
+    with _locks.hold(code):
         revision = revision_fn()
         record = None
         memory_hit = False

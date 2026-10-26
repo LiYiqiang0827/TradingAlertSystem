@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """Local read-only API for the TradingAlert limit-up dashboard prototype."""
 from __future__ import annotations
-import json, os, re, sqlite3, sys, datetime, traceback, calendar, bisect, math, hashlib, threading, gzip
+import copy, json, os, re, sqlite3, sys, datetime, traceback, calendar, bisect, math, hashlib, threading, gzip
 from functools import lru_cache
 from collections import OrderedDict
 import time
 from contextlib import closing
+from cache_singleflight import KeyedLocks
 from http.server import ThreadingHTTPServer, SimpleHTTPRequestHandler
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -455,7 +456,7 @@ def cached_stock_response(key,loader):
             if record is not None:_stock_response_lru.move_to_end(key);return record['payload']
     value=read()
     if value is not None:return value,True
-    with _cache_load_locks[hash(key)%len(_cache_load_locks)]:
+    with _cache_load_locks.hold(key):
         value=read()
         if value is not None:return value,True
         value=loader()
@@ -907,6 +908,38 @@ def kpl_pool(date):
         breaks=filter_unsealed_breaks(date,list(by_code.values()))
         return {"source":"KPL涨停名单 / 涨停表现 / 涨停列表","stocks":attach_daily_prices(date,values),
                 "break_stocks":attach_daily_prices(date,breaks,limit_status="Z")}
+
+def topic_market_dates(topic):
+    """Calendar membership follows the same daily performance label as the pages."""
+    revision=database_revision((KPL_DB,BASIC_DB));key=f'topic-dates:v4:{topic}:{revision}'
+    def load():
+        with sqlite3.connect(f'file:{KPL_DB}?mode=ro',uri=True,timeout=3) as c:
+            tables={row[0] for row in c.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+            c.execute('ATTACH DATABASE ? AS basic',(f'file:{BASIC_DB}?mode=ro',))
+            dates=set()
+            if 'tbl_cn_kpl_limit_performance' in tables:
+                dates.update(row[0] for row in c.execute('''
+                    SELECT DISTINCT p.trade_date FROM tbl_cn_kpl_limit_performance p
+                    LEFT JOIN basic.tbl_cn_day d ON d.trade_date=p.trade_date AND d.ts_code=p.ts_code
+                    LEFT JOIN basic.tbl_cn_stk_limit l ON l.trade_date=p.trade_date AND l.ts_code=p.ts_code
+                    WHERE COALESCE(NULLIF(TRIM(p.theme),''),'暂无题材')=?
+                    AND (d.close IS NULL OR l.up_limit IS NULL OR abs(d.close-l.up_limit)<.005)
+                    AND p.trade_date IS NOT NULL''',(topic,)))
+            if topic=='暂无题材':
+                for table,condition in (('tbl_cn_kpl_list',"tag='涨停'"),('tbl_cn_limit_list',"\"limit\"='U'")):
+                    if table not in tables:continue
+                    missing=("AND NOT EXISTS (SELECT 1 FROM tbl_cn_kpl_limit_performance p WHERE p.trade_date=x.trade_date AND p.ts_code=x.ts_code AND trim(coalesce(p.theme,''))<>'')" if 'tbl_cn_kpl_limit_performance' in tables else '')
+                    dates.update(row[0] for row in c.execute(f'SELECT DISTINCT x.trade_date FROM {table} x WHERE {condition} {missing} AND x.trade_date IS NOT NULL'))
+            trading_days={row[0] for row in c.execute("SELECT cal_date FROM basic.tbl_cn_tradecal WHERE exchange='SSE' AND is_open=1")}
+        return sorted(safe_date(str(day)) for day in dates if str(day) in trading_days)
+    dates=set(cached_series(key,load,3600))
+    live=live_ladder_snapshot()
+    if live.get('available'):
+        day=live['date'];dates.discard(day)
+        if any(stock.get('isSealed') and str(live.get('pool',{}).get(code,{}).get('theme') or '暂无题材').strip()==topic
+               for code,stock in live.get('stocks',{}).items()):dates.add(day)
+    return sorted(dates)
+
 
 def stock_concepts(date):
     """Return each stock's OpenKPL concept labels for the selected trade date."""
@@ -1366,13 +1399,13 @@ def shift_months(day, months):
     year,month=divmod(month_index,12); month+=1
     return day.replace(year=year,month=month,day=min(day.day,calendar.monthrange(year,month)[1]))
 
-_cache_load_locks=tuple(threading.RLock() for _ in range(32))
+_cache_load_locks=KeyedLocks()
 
 def cached_series(key, loader, ttl=7*24*3600):
     value=CACHE.get(key)
     if value is None:
         # Collapse simultaneous cold requests without retaining one lock per key.
-        with _cache_load_locks[hash(key)%len(_cache_load_locks)]:
+        with _cache_load_locks.hold(key):
             value=CACHE.get(key)
             if value is None:
                 value=loader()
@@ -1396,7 +1429,37 @@ def consecutive_board_history(rows, initial_counts=None):
     return by_day
 
 
-def market_stats(date, topics, pool=None):
+def market_stats(date,topics,pool=None):
+    """Cache deterministic market computations separately from graph attribution text."""
+    revision=database_revision((BASIC_DB,KPL_DB))
+    membership=sorted((str(topic.get('name') or ''),sorted(str(stock.get('ts_code') or stock.get('code') or '') for stock in topic.get('stocks',[]))) for topic in topics)
+    signature=hashlib.sha256(json.dumps(membership,ensure_ascii=False,separators=(',',':')).encode()).hexdigest()[:16]
+    key=f'market-stats:v2:{date}:{signature}'
+    record=CACHE.get(key)
+    value=record['payload'] if record and record.get('revision')==revision else None
+    if value is None:
+        with _cache_load_locks.hold(key):
+            record=CACHE.get(key)
+            value=record['payload'] if record and record.get('revision')==revision else None
+            if value is None:
+                value=_compute_market_stats(date,topics,pool)
+                if value.get('sealed') is not None and database_revision((BASIC_DB,KPL_DB))==revision:
+                    CACHE.set(key,{'revision':revision,'payload':value},7*86400)
+                    if CACHE.redis:
+                        CACHE.redis.eval("""redis.call('ZADD',KEYS[1],ARGV[1],ARGV[2])
+                            redis.call('EXPIRE',KEYS[1],604800)
+                            local old=redis.call('ZRANGE',KEYS[1],0,-129)
+                            for _,key in ipairs(old) do
+                                if string.sub(key,1,string.len('market-stats:v2:'))=='market-stats:v2:' then redis.call('DEL',key) end
+                                redis.call('ZREM',KEYS[1],key)
+                            end
+                            return #old""",1,'market-stats-entries:v1',time.time(),key)
+    # Review assembly pops break lists and annotates stock rows with spans.
+    # Never let those edits mutate a cached snapshot shared with another caller.
+    return copy.deepcopy(value)
+
+
+def _compute_market_stats(date, topics, pool=None):
     """Compute daily rates and their yesterday-theme/today-theme/board breakdowns."""
     empty={"date":date,"previousDate":None,"touched":None,"sealed":None,"sealingRate":None,"returnDistributions":[],
            "limitUpHistory":[],
@@ -1872,7 +1935,7 @@ def live_stock_preview_facts(code,day,fallback=None):
 
 def offline_ladder_ready(day):
     """Only hand over when daily prices cover today's pool and yesterday's promotion cohort."""
-    version=database_revision((BASIC_DB,KPL_DB));key='ladder-offline-ready:v1:'+day+':'+version
+    version=database_revision((BASIC_DB,KPL_DB));key='ladder-offline-ready:v2:'+day+':'+version
     cached=CACHE.get(key)
     if cached is not None:return cached
     ready=False
@@ -1889,7 +1952,7 @@ def offline_ladder_ready(day):
                 suspended={row[0] for row in c.execute("SELECT ts_code FROM tbl_cn_suspend WHERE trade_date=? AND suspend_type='S' AND coalesce(suspend_timing,'')=''",(day,))}
                 ready=bool(actual) and expected.issubset(actual|suspended)
     except sqlite3.Error:pass
-    CACHE.set(key,ready,60);return ready
+    CACHE.set(key,ready,86400 if ready else 60);return ready
 
 
 def online_stamp(value):
@@ -2532,7 +2595,7 @@ def review_cache_key(date):
 
 def review_data(date):
     key=review_cache_key(date)
-    complete_key="complete:v1:"+key
+    complete_key="complete:v3:"+key
     def load():
         report=CACHE.get(key)
         if report is None:
@@ -2566,6 +2629,7 @@ def review_data(date):
             stock["previousLimitUpHistoricalFirst"]=info["historicalFirst"]
         for stock in report.get("pool",{}).get("stocks",[]): add_limitup_span(stock)
         for stock in report.get("pool",{}).get("break_stocks",[]): add_limitup_span(stock)
+        for stock in report.get("pool",{}).get("all_break_stocks",[]): add_limitup_span(stock)
         for stock in report.get("marketStats",{}).get("nonPromotedStocks",[]): add_limitup_span(stock)
         for topic in report.get("topics",[]):
             for stock in topic.get("stocks",[]): add_limitup_span(stock)
@@ -2651,54 +2715,7 @@ class Handler(SimpleHTTPRequestHandler):
             if u.path=="/api/topic-dates":
                 topic=(q.get("topic",[""])[0] or "").strip()
                 if not topic: return self.send_json({"error":"topic is required"},400)
-                key=f"topic-dates:v2:{topic}"
-                dates=CACHE.get(key)
-                if dates is None:
-                    from coreClient.neo4j_client import ThemeGraphNeo4jStore
-                    graph_topic_dates=set()
-                    with ThemeGraphNeo4jStore() as graph:
-                        rows=graph._run("""
-                            MATCH (td:TopicDate)-[:ABOUT_TOPIC]->(t:Topic)
-                            MATCH (td)-[:ATTRIBUTES_LIMITUP]->(:Stock)
-                            WHERE coalesce(t.canonical_name,t.source_heading)=$topic AND td.trade_date IS NOT NULL
-                            RETURN DISTINCT td.trade_date AS trade_date
-                            ORDER BY trade_date
-                        """,{"topic":topic})
-                        graph_topic_dates={safe_date(str(row.get("trade_date"))) for row in rows if row.get("trade_date")}
-                        # Market-backed fallback themes use the same title rule as market_topics().
-                        candidate_rows=[]
-                        with sqlite3.connect(f"file:{KPL_DB}?mode=ro",uri=True,timeout=3) as c:
-                            tables={r[0] for r in c.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-                            if "tbl_cn_kpl_list" in tables:
-                                candidate_rows=c.execute("""
-                                    SELECT DISTINCT trade_date,ts_code,lu_desc,theme
-                                    FROM tbl_cn_kpl_list
-                                    WHERE tag='涨停' AND trade_date IS NOT NULL
-                                      AND (trim(coalesce(lu_desc,''))=? OR trim(coalesce(lu_desc,''))='')
-                                """,(topic,)).fetchall()
-                        fallback_codes={}
-                        for day,code,description,raw_theme in candidate_rows:
-                            label=str(description or "").strip()
-                            if not label:
-                                label=re.split(r"[、,，/；;]",str(raw_theme or "").strip())[0].strip()
-                            if label==topic:
-                                fallback_codes.setdefault(safe_date(str(day)),set()).add(str(code or "").split(".")[0][-6:])
-                        candidate_days=sorted(set(fallback_codes)-graph_topic_dates)
-                        graph_attributed_codes={}
-                        if candidate_days:
-                            attributed=graph._run("""
-                                MATCH (td:TopicDate)-[a:ATTRIBUTES_LIMITUP]->(:Stock)
-                                WHERE td.trade_date IN $dates
-                                RETURN td.trade_date AS trade_date, collect(DISTINCT a.stock_code) AS stock_codes
-                            """,{"dates":candidate_days})
-                            for row in attributed:
-                                graph_attributed_codes[safe_date(str(row.get("trade_date")))]=({str(code or "").split(".")[0][-6:] for code in row.get("stock_codes",[]) if code})
-                        for day,codes in fallback_codes.items():
-                            if day in graph_topic_dates or codes-graph_attributed_codes.get(day,set()):
-                                graph_topic_dates.add(day)
-                    dates=sorted(graph_topic_dates)
-                    CACHE.set(key,dates,3600)
-                return self.send_json({"topic":topic,"dates":dates})
+                return self.send_json({"topic":topic,"dates":topic_market_dates(topic),**ladder_data_version()})
             if u.path=="/api/ladder-breaks":
                 start=safe_date(q.get("start",[""])[0]);end=safe_date(q.get("end",[""])[0]);meta=ladder_data_version()
                 dates=[day for day in market_data_dates() if start<=day<=end]
@@ -2962,7 +2979,7 @@ class Handler(SimpleHTTPRequestHandler):
                     except Exception as exc:errors.append({'code':code,'error':type(exc).__name__})
                 return self.send_json({'items':items,'errors':errors,**stock_data_version()})
             if u.path=="/api/chart-cache-status":
-                return self.send_json({'backend':CACHE.backend,'dailyWarm':dict(_daily_warm_status),'registeredStocks':len(_daily_hot)})
+                return self.send_json({'backend':CACHE.backend,'dailyWarm':dict(_daily_warm_status),'registeredStocks':CACHE.redis.zcard('stock-daily-hot:v1') if CACHE.redis else len(_daily_hot),'activeCacheLoads':_cache_load_locks.active_keys})
             if u.path=="/api/stock":
                 code=q.get("code",[""])[0]; date=safe_date(q.get("date",[""])[0]); latest=False
                 if not re.fullmatch(r"\d{6}\.(SH|SZ|BJ)",code): raise ValueError("股票代码无效")
