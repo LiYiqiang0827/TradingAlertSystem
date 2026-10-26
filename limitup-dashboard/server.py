@@ -30,7 +30,7 @@ def live_market_status():
     calendar_known=False
     is_open=False
     try:
-        with sqlite3.connect(f"file:{BASIC_DB}?mode=ro",uri=True,timeout=2) as c:
+        with closing(sqlite3.connect(f"file:{BASIC_DB}?mode=ro",uri=True,timeout=2)) as c:
             row=c.execute("SELECT is_open FROM tbl_cn_tradecal WHERE exchange='SSE' AND cal_date=?",(day,)).fetchone()
         calendar_known=row is not None
         is_open=bool(row and row[0]==1)
@@ -154,14 +154,14 @@ def live_index_history(code,day,kind,data_version=""):
     from zoneinfo import ZoneInfo
     if kind=="fifteenMin":
         database=DBROOT/"offline"/"db_cn_index_minute.db"
-        with sqlite3.connect(f"file:{database}?mode=ro",uri=True,timeout=3) as c:
+        with closing(sqlite3.connect(f"file:{database}?mode=ro",uri=True,timeout=3)) as c:
             rows=c.execute("SELECT datetime,open,high,low,close,amount FROM tbl_cn_index_minute "
                 "WHERE ts_code=? AND period=15 AND trade_date<? AND substr(datetime,12,8)<='15:00:00' "
                 "ORDER BY datetime DESC LIMIT 128",(code,day)).fetchall()
         return [{"timestamp":int(datetime.datetime.fromisoformat(row[0]).replace(tzinfo=ZoneInfo("Asia/Shanghai")).timestamp()*1000),
                  "open":row[1],"high":row[2],"low":row[3],"close":row[4],"volume":float(row[5] or 0)} for row in reversed(rows)]
     database=DBROOT/"offline"/"db_cn_index.db"
-    with sqlite3.connect(f"file:{database}?mode=ro",uri=True,timeout=3) as c:
+    with closing(sqlite3.connect(f"file:{database}?mode=ro",uri=True,timeout=3)) as c:
         rows=c.execute("SELECT trade_date,open,high,low,close,vol FROM tbl_cn_index_daily "
                        "WHERE ts_code=? AND trade_date<? ORDER BY trade_date DESC LIMIT 2400",(code,day)).fetchall()
     return [{"timestamp":int(datetime.datetime.strptime(row[0],"%Y%m%d").replace(tzinfo=datetime.timezone.utc).timestamp()*1000),
@@ -666,7 +666,7 @@ def attach_daily_prices(date, stocks, limit_status="U"):
             print(f"[review] daily OHLC unavailable for {date}: {type(exc).__name__}: {exc}",flush=True)
         try:
             placeholders=','.join('?' for _ in codes)
-            with sqlite3.connect(f"file:{BASIC_DB}?mode=ro",uri=True,timeout=3) as c:
+            with closing(sqlite3.connect(f"file:{BASIC_DB}?mode=ro",uri=True,timeout=3)) as c:
                 rows=c.execute(f"SELECT b.ts_code,b.turnover_rate_f,b.total_mv,b.circ_mv,b.volume_ratio,l.up_limit,d.pre_close,d.open,d.high,d.low,d.amount,l.down_limit,d.close FROM tbl_cn_daily_basic b LEFT JOIN tbl_cn_stk_limit l ON l.trade_date=b.trade_date AND l.ts_code=b.ts_code LEFT JOIN tbl_cn_day d ON d.trade_date=b.trade_date AND d.ts_code=b.ts_code WHERE b.trade_date=? AND b.ts_code IN ({placeholders})",[date,*codes]).fetchall()
             for code,turnover_rate_f,total_mv,circ_mv,volume_ratio,up_limit,pre_close,day_open,day_high,day_low,day_amount,down_limit,day_close in rows:
                 metrics=prices.setdefault(str(code),{})
@@ -687,7 +687,7 @@ def attach_daily_prices(date, stocks, limit_status="U"):
             print(f"[review] free-float turnover unavailable for {date}: {type(exc).__name__}: {exc}",flush=True)
         try:
             placeholders=','.join('?' for _ in codes)
-            with sqlite3.connect(f"file:{BASIC_DB}?mode=ro",uri=True,timeout=3) as c:
+            with closing(sqlite3.connect(f"file:{BASIC_DB}?mode=ro",uri=True,timeout=3)) as c:
                 rows=c.execute(f"""SELECT ts_code,buy_sm_amount,sell_sm_amount,buy_md_amount,sell_md_amount,
                     buy_lg_amount,sell_lg_amount,buy_elg_amount,sell_elg_amount,net_mf_amount
                     FROM tbl_cn_moneyflow WHERE trade_date=? AND ts_code IN ({placeholders})""",[date,*codes]).fetchall()
@@ -703,7 +703,7 @@ def attach_daily_prices(date, stocks, limit_status="U"):
             print(f"[review] moneyflow unavailable for {date}: {type(exc).__name__}: {exc}",flush=True)
         try:
             placeholders=','.join('?' for _ in codes)
-            with sqlite3.connect(f"file:{KPL_DB}?mode=ro",uri=True,timeout=3) as c:
+            with closing(sqlite3.connect(f"file:{KPL_DB}?mode=ro",uri=True,timeout=3)) as c:
                 rows=c.execute(f'''SELECT ts_code,first_time,last_time,fd_amount,amount,turnover_ratio,open_times,float_mv,total_mv
                     FROM tbl_cn_limit_list WHERE trade_date=? AND "limit"=? AND ts_code IN ({placeholders})''',[date,limit_status,*codes]).fetchall()
             for code,first_time,last_time,fd_amount,amount,turnover_ratio,open_times,float_mv,total_mv in rows:
@@ -762,7 +762,7 @@ def filter_unsealed_breaks(date, stocks):
     if not codes or not BASIC_DB.exists(): return []
     placeholders=','.join('?' for _ in codes)
     try:
-        with sqlite3.connect(f"file:{BASIC_DB}?mode=ro",uri=True,timeout=3) as c:
+        with closing(sqlite3.connect(f"file:{BASIC_DB}?mode=ro",uri=True,timeout=3)) as c:
             rows=c.execute(f"""SELECT d.ts_code,d.high,d.close,l.up_limit FROM tbl_cn_day d
                 JOIN tbl_cn_stk_limit l ON l.trade_date=d.trade_date AND l.ts_code=d.ts_code
                 WHERE d.trade_date=? AND d.ts_code IN ({placeholders})""",[date,*codes]).fetchall()
@@ -831,11 +831,11 @@ def previous_limitup_trading_infos(codes, date):
         missing=[code for code in missing if code not in result]
         if not missing:return result
         try:
-            with sqlite3.connect(f'file:{BASIC_DB}?mode=ro',uri=True,timeout=3) as c:
+            with closing(sqlite3.connect(f'file:{BASIC_DB}?mode=ro',uri=True,timeout=3)) as c:
                 sessions=[str(row[0]) for row in c.execute("SELECT cal_date FROM tbl_cn_tradecal WHERE exchange='SSE' AND is_open=1 AND cal_date<=? GROUP BY cal_date ORDER BY cal_date",(date,))]
             indexes={day:i for i,day in enumerate(sessions)}
             history={code:{'dates':set(),'periods':{},'up_stats':{}} for code in missing}
-            with sqlite3.connect(f'file:{KPL_DB}?mode=ro',uri=True,timeout=3) as c:
+            with closing(sqlite3.connect(f'file:{KPL_DB}?mode=ro',uri=True,timeout=3)) as c:
                 tables={row[0] for row in c.execute("SELECT name FROM sqlite_master WHERE type='table'")}
                 for offset in range(0,len(missing),300):
                     chunk=missing[offset:offset+300];marks=','.join('?' for _ in chunk)
@@ -867,7 +867,7 @@ def previous_limitup_trading_info(code,date):
 
 def kpl_pool(date):
     """Merge the three local limit-up snapshots; prefer KPL rows, then fill missing symbols."""
-    with sqlite3.connect(f"file:{KPL_DB}?mode=ro",uri=True,timeout=3) as c:
+    with closing(sqlite3.connect(f"file:{KPL_DB}?mode=ro",uri=True,timeout=3)) as c:
         c.row_factory=sqlite3.Row
         tables={r[0] for r in c.execute("select name from sqlite_master where type='table'")}
         performance={}
@@ -949,7 +949,7 @@ def topic_market_dates(topic):
     """Calendar membership follows the same daily performance label as the pages."""
     revision=database_revision((KPL_DB,BASIC_DB));key=f'topic-dates:v4:{topic}:{revision}'
     def load():
-        with sqlite3.connect(f'file:{KPL_DB}?mode=ro',uri=True,timeout=3) as c:
+        with closing(sqlite3.connect(f'file:{KPL_DB}?mode=ro',uri=True,timeout=3)) as c:
             tables={row[0] for row in c.execute("SELECT name FROM sqlite_master WHERE type='table'")}
             c.execute('ATTACH DATABASE ? AS basic',(f'file:{BASIC_DB}?mode=ro',))
             dates=set()
@@ -984,7 +984,7 @@ def stock_concepts(date):
     if cached is not None: return cached
     result={}
     try:
-        with sqlite3.connect(f"file:{KPL_DB}?mode=ro",uri=True,timeout=3) as c:
+        with closing(sqlite3.connect(f"file:{KPL_DB}?mode=ro",uri=True,timeout=3)) as c:
             rows=c.execute("SELECT con_code,name FROM tbl_cn_kpl_concept_cons WHERE trade_date=? AND con_code IS NOT NULL AND name IS NOT NULL ORDER BY con_code,name",(date,)).fetchall()
         for code,name in rows:
             normalized=str(code).split(".")[0][-6:]
@@ -1064,7 +1064,7 @@ def aggregate_stock_daily(frame, period):
 def _load_stock_daily_basis(code, cutoff):
     """Build one shared set of daily and period bars on the latest adjustment basis."""
     import pandas as pd
-    with sqlite3.connect(f"file:{BASIC_DB}?mode=ro",uri=True,timeout=5) as conn:
+    with closing(sqlite3.connect(f"file:{BASIC_DB}?mode=ro",uri=True,timeout=5)) as conn:
         daily=pd.read_sql_query(
             "SELECT d.trade_date,d.open,d.high,d.low,d.close,d.vol,d.amount,d.pre_close,d.pct_chg,b.turnover_rate_f,b.free_share*b.close*10000 AS free_float_market_cap "
             "FROM tbl_cn_day d LEFT JOIN tbl_cn_daily_basic b ON b.ts_code=d.ts_code AND b.trade_date=d.trade_date "
@@ -1504,6 +1504,7 @@ def _compute_market_stats(date, topics, pool=None):
            "promotionThemes":[],"sealingThemes":[],"topicPromotionRates":{},"promotionBoards":[],"sealingBoards":[],"consecutiveBoardCounts":{},"previousConsecutiveBoardCounts":{},"firstBoardBreakStocks":[],"allBreakStocks":[],"earthSkyStocks":[],
            "limitDownCount":None,"limitDownTouched":None,"limitDownSealed":None,"limitDownSealingRate":None,"yesterdayLimitUpTodayDown":None,"limitDownThemes":[]}
     if not BASIC_DB.exists(): return empty
+    conn=None
     try:
         conn=sqlite3.connect(f"file:{BASIC_DB}?mode=ro",uri=True,timeout=3); conn.row_factory=sqlite3.Row
         recent_dates=[r[0] for r in conn.execute("SELECT DISTINCT trade_date FROM tbl_cn_day WHERE trade_date<=? ORDER BY trade_date DESC LIMIT 60",(date,)).fetchall()]
@@ -1520,7 +1521,7 @@ def _compute_market_stats(date, topics, pool=None):
             graph_topics_by_date={}
             try:
                 placeholders=','.join('?' for _ in recent_dates[:30])
-                with sqlite3.connect(f"file:{KPL_DB}?mode=ro",uri=True,timeout=3) as kc:
+                with closing(sqlite3.connect(f"file:{KPL_DB}?mode=ro",uri=True,timeout=3)) as kc:
                     theme_rows=kc.execute(f"""SELECT trade_date,ts_code,name,theme,board_count,board_period
                         FROM tbl_cn_kpl_limit_performance WHERE trade_date IN ({placeholders})""",recent_dates[:30]).fetchall()
                 daily_groups={}
@@ -1578,7 +1579,7 @@ def _compute_market_stats(date, topics, pool=None):
             empty["consecutiveBoardCounts"]=current_board_counts
         current=conn.execute("""SELECT d.ts_code,d.open,d.high,d.low,d.close,d.pre_close,d.pct_chg,l.up_limit,l.down_limit FROM tbl_cn_day d JOIN tbl_cn_stk_limit l
             ON l.trade_date=d.trade_date AND l.ts_code=d.ts_code WHERE d.trade_date=?""",(date,)).fetchall()
-        if not current: conn.close(); return empty
+        if not current: return empty
         dist_rows=conn.execute("""SELECT d.pct_chg,b.circ_mv FROM tbl_cn_day d LEFT JOIN tbl_cn_daily_basic b
             ON b.trade_date=d.trade_date AND b.ts_code=d.ts_code WHERE d.trade_date=? AND d.pct_chg IS NOT NULL""",(date,)).fetchall()
         edges=[float("-inf"),-7,-5,-3,-1,1,3,5,7,float("inf")]
@@ -1623,7 +1624,7 @@ def _compute_market_stats(date, topics, pool=None):
             result["yesterdayLimitUpTodayDown"]=len(prior_sealed & down_sealed_codes)
             prior_meta={}
             try:
-                with sqlite3.connect(f"file:{KPL_DB}?mode=ro",uri=True,timeout=3) as kc:
+                with closing(sqlite3.connect(f"file:{KPL_DB}?mode=ro",uri=True,timeout=3)) as kc:
                     kc.row_factory=sqlite3.Row
                     prior_meta={r["ts_code"]:dict(r) for r in kc.execute("""SELECT l.ts_code,l.name,
                         COALESCE(NULLIF(p.theme,''),NULLIF(l.lu_desc,''),'') AS theme,l.status
@@ -1706,7 +1707,7 @@ def _compute_market_stats(date, topics, pool=None):
         # rows remain the source of touched/sealed counts and rates.
         def theme_map(day):
             try:
-                with sqlite3.connect(f"file:{KPL_DB}?mode=ro",uri=True,timeout=3) as kc:
+                with closing(sqlite3.connect(f"file:{KPL_DB}?mode=ro",uri=True,timeout=3)) as kc:
                     result={r[0]:str(r[1] or "") for r in kc.execute("SELECT ts_code,lu_desc FROM tbl_cn_kpl_list WHERE trade_date=? AND tag IN ('涨停','炸板')",(day,))}
                     result.update({r[0]:str(r[1] or "") for r in kc.execute("SELECT ts_code,theme FROM tbl_cn_kpl_limit_performance WHERE trade_date=?",(day,)) if r[1]})
                     return result
@@ -1772,9 +1773,11 @@ def _compute_market_stats(date, topics, pool=None):
         # Add same-day market facts for all non-promoted names, including those
         # that did not touch limit-up, so stock detail can render its information row.
         result["nonPromotedStocks"]=attach_daily_prices(date,result.get("nonPromotedStocks",[]))
-        conn.close(); return result
+        return result
     except Exception as exc:
         print("market stats unavailable",date,type(exc).__name__,str(exc),flush=True); return empty
+    finally:
+        if conn is not None:conn.close()
 
 def ladder_board_pattern(raw,consecutive):
     '''The ladder uses the board total in KPL multi-session labels; other views do not.'''
@@ -1913,7 +1916,7 @@ def live_stock_preview_facts(code,day,fallback=None):
         options=[(at,value) for at,value in ((online_stamp(q.get('snapshot_timestamp')),number(q.get('last_price'))),(lp_at,number(lp.get('close_price'))),(zt_at,number(z.get('last_price')))) if at and value and value>0]
         if options:
             _,close=max(options,key=lambda item:item[0])
-            with sqlite3.connect(f'file:{BASIC_DB}?mode=ro',uri=True,timeout=3) as c:limit=c.execute('SELECT up_limit FROM tbl_cn_stk_limit WHERE trade_date=? AND ts_code=?',(day,code)).fetchone()
+            with closing(sqlite3.connect(f'file:{BASIC_DB}?mode=ro',uri=True,timeout=3)) as c:limit=c.execute('SELECT up_limit FROM tbl_cn_stk_limit WHERE trade_date=? AND ts_code=?',(day,code)).fetchone()
             sealed=bool(limit and limit[0] and abs(close-float(limit[0]))<.005)
             seal_options=[(at,value,source) for at,value,source in ((lp_at,number(lp.get('limit_order')),'kpl_performance'),(zt_at,number(z.get('seal_money')),'kpl_zt')) if at and value is not None]
             seal_at,seal_value,seal_source=max(seal_options,key=lambda item:item[0]) if seal_options else (None,None,None)
@@ -1930,7 +1933,7 @@ def live_stock_preview_facts(code,day,fallback=None):
             if high is not None and low is not None:facts['amplitude']=(high-low)/base*100
         facts.update(limitTime=detail.get('time') or facts.get('limitTime'),isSealed=bool(detail.get('isSealed')),sealAmount=number(detail.get('sealAmount')),sealUpdatedAt=detail.get('sealUpdatedAt'),sealSource=detail.get('sealSource'))
     def load_basics():
-        with sqlite3.connect(f'file:{BASIC_DB}?mode=ro',uri=True,timeout=3) as c:
+        with closing(sqlite3.connect(f'file:{BASIC_DB}?mode=ro',uri=True,timeout=3)) as c:
             c.row_factory=sqlite3.Row
             today=c.execute('SELECT * FROM tbl_cn_daily_basic WHERE trade_date=? AND ts_code=?',(day,code)).fetchone()
             previous=c.execute('SELECT MAX(trade_date) FROM tbl_cn_day WHERE trade_date<?',(day,)).fetchone()[0]
@@ -1977,11 +1980,11 @@ def offline_ladder_ready(day):
     ready=False
     try:
         if day in market_data_dates():
-            with sqlite3.connect(f'file:{KPL_DB}?mode=ro',uri=True,timeout=3) as c:
+            with closing(sqlite3.connect(f'file:{KPL_DB}?mode=ro',uri=True,timeout=3)) as c:
                 expected=set()
                 for table,condition in [('tbl_cn_kpl_limit_performance',''),('tbl_cn_kpl_list'," AND tag='涨停'"),('tbl_cn_limit_list'," AND \"limit\"='U'")]:
                     if c.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",(table,)).fetchone():expected.update(row[0] for row in c.execute(f'SELECT ts_code FROM {table} WHERE trade_date=?'+condition,(day,)))
-            with sqlite3.connect(f'file:{BASIC_DB}?mode=ro',uri=True,timeout=3) as c:
+            with closing(sqlite3.connect(f'file:{BASIC_DB}?mode=ro',uri=True,timeout=3)) as c:
                 previous=c.execute('SELECT MAX(trade_date) FROM tbl_cn_day WHERE trade_date<?',(day,)).fetchone()[0]
                 expected.update(row[0] for row in c.execute('SELECT d.ts_code FROM tbl_cn_day d JOIN tbl_cn_stk_limit l ON l.ts_code=d.ts_code AND l.trade_date=d.trade_date WHERE d.trade_date=? AND l.up_limit>0 AND abs(d.close-l.up_limit)<.005',(previous,)))
                 actual={row[0] for row in c.execute('SELECT d.ts_code FROM tbl_cn_day d JOIN tbl_cn_stk_limit l ON l.ts_code=d.ts_code AND l.trade_date=d.trade_date WHERE d.trade_date=? AND d.close IS NOT NULL',(day,))}
@@ -2028,7 +2031,7 @@ def _read_online_close_uncached(kind,day,client=None):
     database=DBROOT/'online'/('online_data_'+day[:6]+'.db');table=kind+'_'+day
     if not database.exists():return {},None,'unavailable'
     try:
-        with sqlite3.connect(f'file:{database}?mode=ro',uri=True,timeout=3) as c:
+        with closing(sqlite3.connect(f'file:{database}?mode=ro',uri=True,timeout=3)) as c:
             c.row_factory=sqlite3.Row
             if not c.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",(table,)).fetchone():return {},None,'unavailable'
             actual_field='snapshot_timestamp' if kind=='snapshot_index' else field
@@ -2102,7 +2105,7 @@ def live_ladder_snapshot():
         if zt_time is None and lp_time is None:
             previous=CACHE.get('ladder-live-last:v1:'+day) if status['phase']=='recess' or closed else None
             return {**previous,'status':status,'frozen':True,'mode':'close' if closed else 'live','offlineReady':False} if previous else empty
-        with sqlite3.connect(f'file:{BASIC_DB}?mode=ro',uri=True,timeout=3) as c:
+        with closing(sqlite3.connect(f'file:{BASIC_DB}?mode=ro',uri=True,timeout=3)) as c:
             limits={code:(up,down) for code,up,down in c.execute('SELECT ts_code,up_limit,down_limit FROM tbl_cn_stk_limit WHERE trade_date=?',(day,))}
             names=dict(c.execute('SELECT ts_code,name FROM tbl_cn_basic'))
             previous=c.execute('SELECT MAX(trade_date) FROM tbl_cn_day WHERE trade_date<?',(day,)).fetchone()[0]
@@ -2443,7 +2446,7 @@ def ladder_stock_facts(date,code):
             text=datetime.datetime.fromtimestamp(stamp,datetime.timezone(datetime.timedelta(hours=8))).strftime('%H:%M:%S')
         return text if re.fullmatch(r'(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d',text) and text!='00:00:00' else None
     facts={'code':code,'date':date,'priceBasis':'unadjusted','close':None,'pct':None,'amplitude':None,'openPct':None,'limitTime':None,'amount':None,'floatMarketCap':None,'totalMarketCap':None,'freeFloatTurnover':None,'breakTime':None,'breakCount':None,'factsVersion':2}
-    with sqlite3.connect(f'file:{BASIC_DB}?mode=ro',uri=True,timeout=3) as c:
+    with closing(sqlite3.connect(f'file:{BASIC_DB}?mode=ro',uri=True,timeout=3)) as c:
         row=c.execute('''SELECT d.close,d.pre_close,d.open,d.high,d.low,d.amount,d.pct_chg,b.circ_mv,b.turnover_rate_f,b.total_mv
             FROM tbl_cn_day d LEFT JOIN tbl_cn_daily_basic b ON b.trade_date=d.trade_date AND b.ts_code=d.ts_code
             WHERE d.trade_date=? AND d.ts_code=?''',(date,code)).fetchone()
@@ -2454,7 +2457,7 @@ def ladder_stock_facts(date,code):
             if facts['pct'] is None and close is not None:facts['pct']=(close/base-1)*100
             if opening is not None:facts['openPct']=(opening/base-1)*100
             if high is not None and low is not None:facts['amplitude']=(high-low)/base*100
-    with sqlite3.connect(f'file:{KPL_DB}?mode=ro',uri=True,timeout=3) as c:
+    with closing(sqlite3.connect(f'file:{KPL_DB}?mode=ro',uri=True,timeout=3)) as c:
         rows=c.execute('''SELECT lu_time,open_time FROM tbl_cn_kpl_list
             WHERE trade_date=? AND ts_code=? AND tag IN ('涨停','炸板')
             ORDER BY CASE tag WHEN '涨停' THEN 0 ELSE 1 END''',(date,code)).fetchall()
@@ -2483,7 +2486,7 @@ def ladder_topic_stock_details(date):
             number=float(value)
             return number if math.isfinite(number) and number>=0 else None
         except (TypeError,ValueError):return None
-    with sqlite3.connect(f'file:{KPL_DB}?mode=ro',uri=True,timeout=3) as connection:
+    with closing(sqlite3.connect(f'file:{KPL_DB}?mode=ro',uri=True,timeout=3)) as connection:
         for code,value in connection.execute('SELECT ts_code,limit_order FROM tbl_cn_kpl_limit_performance WHERE trade_date=?',(date,)):
             item(code)['sealAmount']=amount(value)
         for code,value in connection.execute("SELECT ts_code,limit_order FROM tbl_cn_kpl_list WHERE trade_date=? AND tag='涨停'",(date,)):
@@ -2495,7 +2498,7 @@ def ladder_topic_stock_details(date):
     codes=sorted(stocks)
     if codes:
         marks=','.join('?' for _ in codes)
-        with sqlite3.connect(f'file:{BASIC_DB}?mode=ro',uri=True,timeout=3) as connection:
+        with closing(sqlite3.connect(f'file:{BASIC_DB}?mode=ro',uri=True,timeout=3)) as connection:
             for code,value in connection.execute(f'SELECT ts_code,pct_chg FROM tbl_cn_day WHERE trade_date=? AND ts_code IN ({marks})',[date,*codes]):
                 try:
                     number=float(value)
@@ -2503,7 +2506,7 @@ def ladder_topic_stock_details(date):
                 except (TypeError,ValueError):pass
     # One date-level read also covers failed promotions absent from today's KPL pool.
     turnover_rates={}
-    with sqlite3.connect(f'file:{BASIC_DB}?mode=ro',uri=True,timeout=3) as connection:
+    with closing(sqlite3.connect(f'file:{BASIC_DB}?mode=ro',uri=True,timeout=3)) as connection:
         for code,value in connection.execute('SELECT ts_code,turnover_rate_f FROM tbl_cn_daily_basic WHERE trade_date=?',(date,)):
             parsed=amount(value)
             if parsed is not None:turnover_rates[code]=parsed
@@ -2558,7 +2561,7 @@ def ladder_date_stock_details(date, include_details=True):
     if details is None:
         details={**ladder_topic_stock_details(date),**meta};CACHE.set(key,details,details['ttlSeconds'])
     details={**details,'stocks':{code:dict(stock) for code,stock in details['stocks'].items()}}
-    with sqlite3.connect(f'file:{BASIC_DB}?mode=ro',uri=True,timeout=3) as connection:
+    with closing(sqlite3.connect(f'file:{BASIC_DB}?mode=ro',uri=True,timeout=3)) as connection:
         connection.row_factory=sqlite3.Row
         failures=[]
         for row in connection.execute('''SELECT d.ts_code,d.pct_chg FROM tbl_cn_day d
@@ -2579,7 +2582,7 @@ def ladder_date_stock_details(date, include_details=True):
         if re.fullmatch(r'\d{1,6}',value):
             value=value.zfill(6);return f'{value[:2]}:{value[2:4]}:{value[4:]}'
         return value
-    with sqlite3.connect(f'file:{KPL_DB}?mode=ro',uri=True,timeout=3) as connection:
+    with closing(sqlite3.connect(f'file:{KPL_DB}?mode=ro',uri=True,timeout=3)) as connection:
         for code,name,time,theme,description in connection.execute("SELECT ts_code,name,lu_time,theme,lu_desc FROM tbl_cn_kpl_list WHERE trade_date=? AND tag IN ('涨停','炸板')",(date,)):
             raw=str(description or theme or '').strip()
             market[code]={'name':name or names.get(code) or code[:6],'time':clock(time),'theme':re.split(r'[、,，;；]',raw)[0].strip() or '暂无题材','marketReason':''}
@@ -2606,7 +2609,7 @@ def ladder_date_stock_details(date, include_details=True):
 
 def ladder_market_summary(date):
     """Same market-wide cohorts as market_stats; read only today and yesterday."""
-    with sqlite3.connect(f'file:{BASIC_DB}?mode=ro',uri=True,timeout=3) as connection:
+    with closing(sqlite3.connect(f'file:{BASIC_DB}?mode=ro',uri=True,timeout=3)) as connection:
         connection.row_factory=sqlite3.Row
         previous=connection.execute('SELECT MAX(trade_date) FROM tbl_cn_day WHERE trade_date<?',(date,)).fetchone()[0]
         rows=connection.execute("""SELECT d.trade_date,d.ts_code,d.close,d.high,l.up_limit
@@ -2827,7 +2830,7 @@ class Handler(SimpleHTTPRequestHandler):
                 def load_topic_intraday():
                     if not codes: return {"date":date,"series":{}}
                     placeholders=','.join('?' for _ in codes)
-                    with sqlite3.connect(f"file:{BASIC_DB}?mode=ro",uri=True,timeout=3) as c:
+                    with closing(sqlite3.connect(f"file:{BASIC_DB}?mode=ro",uri=True,timeout=3)) as c:
                         limits={str(code):(float(preclose),float(down),float(up)) for code,preclose,down,up in c.execute(f"SELECT d.ts_code,d.pre_close,l.down_limit,l.up_limit FROM tbl_cn_day d JOIN tbl_cn_stk_limit l ON l.ts_code=d.ts_code AND l.trade_date=d.trade_date WHERE d.trade_date=? AND d.ts_code IN ({placeholders}) AND d.pre_close>0 AND l.down_limit>0 AND l.up_limit>0",[date,*codes]).fetchall()}
                     frame=get_oneMin(ts_codes=codes,trade_date=date,columns=["ts_code","datetime","close","vol"])
                     frame=filter_after_close(frame)

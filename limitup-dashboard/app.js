@@ -385,18 +385,20 @@
     finally{liveBusy=false;if(requestId!==liveRequestId&&liveEnabled&&isLivePage())refreshLivePage(true);}
   }
   let liveEventSource=null,livePushTimer=0,livePushPending=null,livePushRunning=false;
-  const livePushedQuotes=new Map();
+  const livePushedQuotes=new Map();let liveQuoteDate='';
   function receiveLiveMarketStatus(data){
     const previous=liveStatus?.phase;liveStatus=data;liveClockOffset=Date.parse(data.serverTime)-Date.now();updateMarketClock();
     const choice=sessionStorage.getItem(`liveData:${data.date}`);liveEnabled=choice===null?data.defaultEnabled:choice==='true';applyLiveControls();
     if(previous!==data.phase&&ladderView?.live){ladderView.live.frozen=data.phase==='recess';updateLiveLadderLabel(ladderView);}
   }
   function patchPushedStockQuotes(event){
-    const date=event.status?.date;if(!date)return;
+    const date=event.status?.date;if(!date||date<liveQuoteDate)return;
+    if(date!==liveQuoteDate){livePushedQuotes.clear();liveQuoteDate=date;}
     for(const row of event.quotes||[]){
       const key=date+':'+row.code,prior=livePushedQuotes.get(key);if(prior&&prior.timestamp>row.timestamp)continue;
       const value=Number(row.pct);if(row.pct==null||!Number.isFinite(value))continue;
       const quote={...row,pct:value,date};livePushedQuotes.set(key,quote);
+      while(livePushedQuotes.size>16384)livePushedQuotes.delete(livePushedQuotes.keys().next().value);
     }
     for(const quote of event.indices||[]){
       for(const name of document.querySelectorAll(`#ladderTopicHover .vl-date-index [data-index-preview="${quote.code}"][data-index-date="${date}"]`)){
@@ -517,7 +519,12 @@
     schedule(){clearTimeout(this.timer);if(this.items.size){const next=Math.min(...[...this.items.values()].map(r=>Math.min(r.deadline,r.access+this.idle)));this.timer=setTimeout(()=>this.prune(),Math.max(50,next-Date.now()+1));}}
     get(key,touch=true){const r=this.items.get(key);if(!r)return null;const now=Date.now();if(r.deadline<=now||r.access+this.idle<=now){this.delete(key);return null;}if(touch){r.access=now;this.items.delete(key);this.items.set(key,r);this.schedule();}return r.value;}
     peek(key){return this.get(key,false);}
-    set(key,value,ttl=this.age){this.delete(key,false);const bytes=JSON.stringify(value).length*2;if(bytes<=this.maxBytes&&ttl>0){this.items.set(key,{value,bytes,deadline:Date.now()+Math.min(ttl,this.age),access:Date.now()});this.bytes+=bytes;}this.prune();return value;}
+    setMany(entries,ttl=this.age){
+      const now=Date.now(),deadline=now+Math.min(ttl,this.age);
+      for(const [key,value] of entries){this.delete(key,false);const bytes=JSON.stringify(value).length*2;if(bytes<=this.maxBytes&&ttl>0){this.items.set(key,{value,bytes,deadline,access:now});this.bytes+=bytes;}}
+      this.prune();
+    }
+    set(key,value,ttl=this.age){this.setMany([[key,value]],ttl);return value;}
     delete(key,schedule=true){const r=this.items.get(key);if(r){this.bytes-=r.bytes;this.items.delete(key);}if(schedule)this.schedule();}
     clear(){this.items.clear();this.bytes=0;clearTimeout(this.timer);}
     get size(){return this.items.size;}
@@ -526,7 +533,7 @@
   const stockMemoryCache=new DeadlineLRU(STOCK_CACHE_LIMIT,64*CACHE_MIB,2*3600000,30*60000);
   const liveStockMemoryCache=new DeadlineLRU(40,24*CACHE_MIB,15*60000,15*60000);
   const stockFactsMemoryCache=new DeadlineLRU(200,2*CACHE_MIB,30*60000);
-  const liveStockDirty=new DeadlineLRU(1024,CACHE_MIB,2*3600000);
+  const liveStockDirty=new DeadlineLRU(8192,2*CACHE_MIB,2*3600000);
   let stockCacheDbPromise=null,stockNavigationTimer=null,pendingStockTarget=null,stockMeta=null,stockVersionCheckedAt=0,stockVersionRequest=null;
   const stockHistoryRequests=new Map();
   function stockCacheKey(code,date){return 'stock:'+date+':'+code;}
@@ -660,9 +667,11 @@
 
   document.addEventListener('visibilitychange',()=>{if(!document.hidden&&state.review&&document.documentElement.dataset.dailyPreloadState==='paused')scheduleDailyPreload(state.review);});
   function noteLiveStockChanges(event){
-    const date=event.status?.date;if(!date)return;const stamp=Date.parse(event.receivedAt)||Date.now();
-    for(const row of event.quotes||[])liveStockDirty.set(date+':'+row.code,stamp);
-    for(const update of event.updates||[])if(['snapshot','zt','break','limitperformance','minute'].includes(update.kind))for(const code of update.codes||[])liveStockDirty.set(date+':'+code,stamp);
+    const date=event.status?.date;if(!date)return;const started=performance.now(),stamp=Date.parse(event.receivedAt)||Date.now(),changes=new Map();
+    for(const row of event.quotes||[])changes.set(date+':'+row.code,stamp);
+    for(const update of event.updates||[])if(['snapshot','zt','break','limitperformance','minute'].includes(update.kind))for(const code of update.codes||[])changes.set(date+':'+code,stamp);
+    if(changes.size)liveStockDirty.setMany(changes);
+    if(profileBoot){document.documentElement.dataset.liveDirtyMs=(performance.now()-started).toFixed(1);document.documentElement.dataset.liveDirtyBatch=String(changes.size);document.documentElement.dataset.liveDirtySize=String(liveStockDirty.size);}
   }
   function liveHoverFreshMs(){return liveStatus?.phase==='trading'?3000:liveStatus?.phase==='recess'?60000:new Date(Date.now()+liveClockOffset).toLocaleTimeString('sv-SE',{timeZone:'Asia/Shanghai',hour12:false})<'15:05:00'?3000:300000;}
   function liveHoverLifetime(){return liveStatus?.phase==='closed'?6*3600000:120000;}
