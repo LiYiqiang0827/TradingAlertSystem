@@ -292,3 +292,43 @@ Python >=3.10；默认监听 `127.0.0.1:8765`，可用 `TRADINGALERT_HOST/PORT` 
 ## 悬浮图缩放坐标修正（2026-10-26）
 
 图表输入坐标按实际显示宽高与布局宽高分别归一化，修复界面放大时十字光标偏离鼠标的问题。个股、指数、放大窗口与缓存图表复用共用修正；K 线竖线仍按最近柱的位置吸附。修改说明与可重放脚本见 [vendor/KLINECHARTS-PATCHES.md](vendor/KLINECHARTS-PATCHES.md)。HTML 的图表脚本 URL 添加独立版本参数，刷新后会获取修正文件。
+## 离线涨停天梯节点库（2026-10-27）
+
+需要同步 TradingDataManager：
+[TradeDataManager commit 3a6b51a](https://github.com/LiYiqiang0827/TradeDataManager/commit/3a6b51a)。
+读取类为 `coreClient.limitup_ladder.LimitupLadderStore`，构建与配置说明见该仓库 `limitup_ladder/README.md`。
+默认数据文件为 `~/TradingDatabase/offline/limitup_ladder.db`，不提交数据库或凭据到 Git。
+
+首次部署：
+
+```sh
+cd ~/TradingDataManager
+.venv/bin/python -m limitup_ladder.build
+cd ~/TradingAlertSystem/limitup-dashboard
+~/TradingDataManager/.venv/bin/python server.py
+```
+
+现有 scheduler 的完整/早间更新和原始日线、KPL performance/list、limit_list、涨跌停价、
+停牌服务提交后会触发增量检查，原始数据未齐时保留上一发布版本。服务端历史路径直接读取节点库；
+实时当天仅计算一日节点后叠加。数据库不存在或历史覆盖不足时继续使用原有计算器兜底。
+复权行情、Neo4j 归因、实时行情源及图表 API 的原有配置沿用现有部署。
+
+### 题材规则
+
+数据库保留原始分类和以晋级链为单位的生效日期历史。查询截止日之前可见的最高板节点决定该链分类。
+例如大业股份：10/16 截止是“汽车零部件”；包含后续晋级则为“机器人概念”，原始分类仍可查询。
+重新首板的续接线不合并连板题材链。客户端保留 originalTheme 用于历史页面导航。
+
+### 本次核验
+
+- 2018-01-02 至 2026-10-26 共 2,136 个来源日期，2,114 个通过完整性门槛；
+  22 个历史日期存在个别股票日线/涨跌停价缺口，保留可选日期并回退原算法，不静默删除。
+- 存储 310,532 条各类节点、82,812 条晋级/续接边；SQLite quick_check 为 ok。
+- 10 组不同日期、1/5/20/30 日窗口，对照旧版本 2d099c4 的涨停节点、未晋级及连接一致。
+  边界上下文改为保留实际连接需要的节点，去掉旧算法遗留的无连接上下文；上下文名称/时间采用该日持久记录。
+- 核对原始/截止日题材、几天几板、停牌复牌、首次破板后再次首板、历史修订后增量重算和不完整更新回滚。
+- 实时叠加通过历史行情模拟的盘中/收盘对照，且核对长停牌后未涨停复牌的结果更新；仍需下一交易时段实际 SSE 验收。
+- 同一 20261026 截止的 19 日窗口、结果缓存未命中：旧接口 602.66 ms，新接口 76.46 ms（Mac mini localhost，gzip）。
+  缓存命中分别为 32.50 / 42.65 ms；新结果同时携带历史破板记录，避免首屏再逐日补查。
+- 20 日窗口直接读取约 14–18 ms；浏览器首次从 JS 初始化到天梯画出约 453 ms（包含约 163 ms 绘图，不含脚本下载）。
+  日期目录接口本次约 13 ms。上述为当前样本测量，非所有日期或断电后磁盘冷读保证。

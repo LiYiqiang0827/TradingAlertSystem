@@ -1686,7 +1686,7 @@
     // Actual promotion edges keep a multi-session pattern together across breaks or pauses.
     for(const edge of links){if(edge.status!=='promoted')continue;const source=raw.get(edge.source),target=raw.get(edge.target);if(!source||!target||source.code!==target.code||target.date<=source.date||target.board!==source.board+1)continue;parent.set(find(source.id),find(target.id));}
     const peaks=new Map();for(const node of raw.values()){const root=find(node.id),peak=peaks.get(root);if(!peak||node.board>peak.board||(node.board===peak.board&&((node.status==='sealed'&&peak.status!=='sealed')||(node.status===peak.status&&node.date>peak.date))))peaks.set(root,node);}
-    return new Map([...raw].map(([id,node])=>{const peak=peaks.get(find(id));return [id,{...node,originalTheme:node.theme,theme:peak.theme,themePeakDate:peak.sourceDate||peak.date,themePeakBoard:peak.board}];}));
+    return new Map([...raw].map(([id,node])=>{const peak=peaks.get(find(id));return [id,{...node,originalTheme:node.originalTheme||node.theme,theme:peak.theme,themePeakDate:peak.sourceDate||peak.date,themePeakBoard:peak.board}];}));
   }
   async function loadLadderBrokenStocks(view){
     if(view.breakLoading||ladderView!==view||history.state?.view!=='ladder'||!$('#ladderChart'))return;
@@ -1712,6 +1712,8 @@
         view.live=payload.live;view.brokenDates.add(day);for(const stock of payload.brokenStocks||[])view.broken.set(stock.id,stock);
       }
       for(const day of payload.dates)view.days.add(day);
+      for(const day of payload.brokenDates||[])view.brokenDates.add(day);
+      for(const stock of payload.brokenStocks||[])view.broken.set(stock.id,stock);
       for(const node of payload.sealedStocks||[])view.sealed.set(node.id,node);
       for(const node of payload.contextStocks||[])view.sealed.set(node.id,node);
       for(const node of payload.relimitContextStocks||[])view.sealed.set(node.id,node);
