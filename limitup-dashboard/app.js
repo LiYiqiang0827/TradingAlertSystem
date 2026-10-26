@@ -390,15 +390,20 @@
       }
     }
     const view=ladderView;if(!view?.data||view.endDay!==date)return;
-    const patch=stock=>{if(stock.date===date){const quote=livePushedQuotes.get(date+':'+stock.code);if(quote)stock.pct=quote.pct;}};
+    let changed=false;
+    const patch=stock=>{if(stock.date===date){const quote=livePushedQuotes.get(date+':'+stock.code);if(quote&&stock.pct!==quote.pct){stock.pct=quote.pct;changed=true;}}};
     for(const map of [view.sealed,view.unpromoted,view.broken])for(const stock of map.values())patch(stock);
-    for(const list of [view.data.nodes,view.data.sealedStocks,view.data.unpromotedStocks,view.data.brokenStocks])for(const stock of list||[])patch(stock);
-    for(const el of document.querySelectorAll(`#ladderChart [data-vl-pct-date="${date}"]`)){
+    for(const data of [view.data,view.liveLegendPayload,view.specifiedLegendPayload])if(data)for(const list of [data.nodes,data.sealedStocks,data.unpromotedStocks,data.brokenStocks])for(const stock of list||[])patch(stock);
+    if(!changed)return;
+    for(const el of document.querySelectorAll(`#ladderChart [data-vl-pct-date="${date}"],#ladderLegend [data-vl-pct-date="${date}"]`)){
       const quote=livePushedQuotes.get(date+':'+el.dataset.vlStockPct);if(!quote)continue;
-      el.textContent=(quote.pct>0?'+':'')+quote.pct.toFixed(2)+'%';el.classList.toggle('vl-live-up',quote.pct>0);el.classList.toggle('vl-live-down',quote.pct<0);
+      const text=(quote.pct>0?'+':'')+quote.pct.toFixed(2)+'%',row=el.closest('[data-vl-legend-stock]');
+      if(row)row.title=row.title.replace(' · 涨幅 '+el.textContent+' · ',' · 涨幅 '+text+' · ');
+      if(el.textContent!==text)el.textContent=text;
+      const legend=Boolean(row);el.classList.toggle(legend?'pct-up':'vl-live-up',quote.pct>0);el.classList.toggle(legend?'pct-down':'vl-live-down',quote.pct<0);
     }
-    // Quote text updates retain cached card DOM; a later fold must not restore old prices.
-    view.cardMarkupCache?.clear();view.cardDOMCache?.clear();view.refreshLegendStocks?.();
+    // Quotes update text in place; rebuilding the legend cannot change its membership.
+    view.cardMarkupCache?.clear();view.cardDOMCache?.clear();
   }
   function queueLivePush(event){
     if(event.status)receiveLiveMarketStatus(event.status);
@@ -433,6 +438,8 @@
       if(resync||kinds.has('snapshot_index'))jobs.push(refreshPushedHover(indexHover));
       if(resync||codes.has(ladderStockHover?.card.dataset.stock)||kinds.has('minute'))jobs.push(refreshPushedHover(ladderStockHover));
       await Promise.allSettled(jobs);
+      // Refresh seal amounts only for visible stock rows, after the source cache is invalidated.
+      if((resync||['limitperformance','zt','break'].some(kind=>kinds.has(kind)))&&document.querySelector('#ladderLegend .vl-legend-stock-row'))ladderView?.refreshLegendStocks?.();
     }finally{livePushRunning=false;if(livePushPending&&!livePushTimer)livePushTimer=setTimeout(flushLivePush,100);}
   }
   function syncLivePushConnection(){
@@ -833,7 +840,7 @@
       mergeLadderPayload(view,result.payload,result.source);
       for(const key of ladderDateDetailCache.keys())if(key.startsWith(status.date+':'))ladderDateDetailCache.delete(key);
       for(const key of ladderTopicDetailCache.keys())if(key.startsWith(status.date+':'))ladderTopicDetailCache.delete(key);
-      view.specifiedLegendCache?.clear();if(view.specifiedDay===status.date)view.specifiedLegendPayload=null;
+      // mergeLadderPayload already seeded the new live legend; keep it visible during updates.
       if(ladderStockHover&&!ladderStockHover.card.hidden||ladderTopicHover&&!ladderTopicHover.card.hidden||indexHover&&!indexHover.card.hidden){view.pendingPaint=true;updateLiveLadderLabel(view);return;}
       closeLadderTopicHover();rebuildVerticalLadder(view);updateLiveLadderLabel(view);
     }catch(error){if(ladderView===view)updateLiveLadderLabel(view,'实时更新失败，保留上一快照');console.warn('实时天梯更新失败',error);}finally{view.liveLoading=false;}
@@ -968,8 +975,8 @@
   }
   function ladderLegendStockVisible(view,theme){return view.legendStockOverrides?.get(theme)??Boolean(view.legendStocksAll);}
   function ladderLegendStockRow(stock,facts){
-    const raw=facts?.pct??stock.pct,pct=Number(raw),hasPct=raw!=null&&raw!==''&&Number.isFinite(pct),pctText=hasPct?(pct>0?'+':'')+pct.toFixed(2)+'%':'—',tone=hasPct?(pct>0?'pct-up':pct<0?'pct-down':''):'',time=stock.status==='unpromoted'&&!stock.touchedLimit?'':stock.time||facts?.time||'',amount=stock.status==='sealed'?compactBoardAmount(facts?.sealAmount):'—',badge=stock.status==='sealed'?ladderHoverBoardBadge(stock):ladderHoverOutcomeBadge(stock),label=stock.status==='unpromoted'?'未晋级 · 昨'+(stock.previousBoardPeriod||stock.previousBoard+'板'):stock.status==='broken'?'破板':stock.boardPeriod;
-    return `<button type="button" class="vl-legend-stock-row" data-vl-legend-stock="${esc(stock.id)}" aria-label="${esc(stock.name+' · '+label+' · '+fmtDate(stock.date))}" title="${esc(fmtDate(stock.date)+' · '+stock.name+' · '+label+' · 涨幅 '+pctText+' · 涨停时间 '+(time||'—')+' · 封板金额 '+amount+' · 单击显示题材内的单股紧凑脉络，双击查看个股')}" style="--ladder-theme-color:${ladderThemeColor(stock.theme)}">${badge}<span data-vl-stock-preview="${esc(stock.id)}" class="vl-legend-stock-name${isLadderGrowthStock(stock.code)?' vl-hover-growth-name':''}">${esc(stock.name)}</span><span class="vl-legend-stock-pct ${tone}">${esc(pctText)}</span><time>${esc(time||'—')}</time><span class="vl-legend-stock-amount">${esc(amount)}</span></button>`;
+    const pushed=liveEnabled&&stock.date===liveStatus?.date?livePushedQuotes.get(stock.date+':'+stock.code):null,raw=pushed?.pct??facts?.pct??stock.pct,pct=Number(raw),hasPct=raw!=null&&raw!==''&&Number.isFinite(pct),pctText=hasPct?(pct>0?'+':'')+pct.toFixed(2)+'%':'—',tone=hasPct?(pct>0?'pct-up':pct<0?'pct-down':''):'',time=stock.status==='unpromoted'&&!stock.touchedLimit?'':stock.time||facts?.time||'',amount=stock.status==='sealed'?compactBoardAmount(facts?.sealAmount):'—',badge=stock.status==='sealed'?ladderHoverBoardBadge(stock):ladderHoverOutcomeBadge(stock),label=stock.status==='unpromoted'?'未晋级 · 昨'+(stock.previousBoardPeriod||stock.previousBoard+'板'):stock.status==='broken'?'破板':stock.boardPeriod;
+    return `<button type="button" class="vl-legend-stock-row" data-vl-legend-stock="${esc(stock.id)}" aria-label="${esc(stock.name+' · '+label+' · '+fmtDate(stock.date))}" title="${esc(fmtDate(stock.date)+' · '+stock.name+' · '+label+' · 涨幅 '+pctText+' · 涨停时间 '+(time||'—')+' · 封板金额 '+amount+' · 单击显示题材内的单股紧凑脉络，双击查看个股')}" style="--ladder-theme-color:${ladderThemeColor(stock.theme)}">${badge}<span data-vl-stock-preview="${esc(stock.id)}" class="vl-legend-stock-name${isLadderGrowthStock(stock.code)?' vl-hover-growth-name':''}">${esc(stock.name)}</span><span class="vl-legend-stock-pct ${tone}" data-vl-stock-pct="${esc(stock.code)}" data-vl-pct-date="${esc(stock.date)}">${esc(pctText)}</span><time>${esc(time||'—')}</time><span class="vl-legend-stock-amount">${esc(amount)}</span></button>`;
   }
   function ladderSelectStockPath(view,stock,fullData){
     const canonical=[...(fullData.sealedStocks||[]),...(fullData.unpromotedStocks||[]),...(fullData.brokenStocks||[])].find(node=>node.id===stock.id)||stock,theme=canonical.theme||stock.theme;
@@ -1462,7 +1469,14 @@
       for(const stock of payload.unpromotedStocks||[])view.unpromoted.set(stock.id,stock);
       for(const node of payload.nodes)if(node.status!=='sealed')view.outcomes.set(node.id,node);
       for(const edge of payload.links)view.links.set(edge.source+'|'+edge.target,edge);
-    const indices=[...view.days].map(day=>state.dates.indexOf(day)).filter(index=>index>=0);view.low=Math.min(...indices);view.high=Math.max(...indices);view.dataVersion=payload.ladderDataVersion;view.cacheSource=source;loadLadderBrokenStocks(view);
+    const indices=[...view.days].map(day=>state.dates.indexOf(day)).filter(index=>index>=0);view.low=Math.min(...indices);view.high=Math.max(...indices);view.dataVersion=payload.ladderDataVersion;view.cacheSource=source;
+    if(payload.live){
+      const date=payload.live.date,legend={date,sealedStocks:[...(payload.contextStocks||[]),...(payload.sealedStocks||[])].filter(stock=>stock.date===date),unpromotedStocks:(payload.unpromotedStocks||[]).filter(stock=>stock.date===date).map(stock=>({...stock,status:'unpromoted'})),brokenStocks:(payload.brokenStocks||[]).filter(stock=>stock.date===date).map(stock=>({...stock,status:'broken'}))};
+      // The live ladder response already contains the complete current-day membership.
+      view.liveLegendPayload=legend;(view.specifiedLegendCache||=new Map()).set(date+':'+view.dataVersion,legend);
+      if(view.specifiedDay===date){view.specifiedLegendPayload=legend;view.specifiedLegendRequestId=(view.specifiedLegendRequestId||0)+1;}
+    }
+    loadLadderBrokenStocks(view);
   }
   function rebuildVerticalLadder(view,anchor='preserve'){
     if(ladderView!==view||history.state?.view!=='ladder'||!$('#ladderChart'))return;view.pendingPaint=false;
@@ -1541,8 +1555,7 @@
     while(existing.childNodes.length>fresh.childNodes.length)existing.lastChild.remove();
   }
   function patchLadderLegend(existing,fresh){
-    if(existing.nodeType===Node.ELEMENT_NODE&&existing.nodeName==='INPUT'&&existing.type==='checkbox')existing.checked=fresh.checked;
-    if(existing.isEqualNode(fresh))return;
+    if(existing.isEqualNode(fresh)){if(existing.nodeName==='INPUT'&&existing.type==='checkbox')existing.checked=fresh.checked;return;}
     if(existing.nodeType!==fresh.nodeType||existing.nodeName!==fresh.nodeName){existing.replaceWith(fresh.cloneNode(true));return;}
     if(existing.nodeType!==Node.ELEMENT_NODE){existing.nodeValue=fresh.nodeValue;return;}
     for(const attribute of [...existing.attributes])if(!fresh.hasAttribute(attribute.name))existing.removeAttribute(attribute.name);
@@ -1553,10 +1566,21 @@
       if(!child){child=newChild.cloneNode(true);existing.insertBefore(child,existing.childNodes[index]||null);}else{if(existing.childNodes[index]!==child)existing.insertBefore(child,existing.childNodes[index]||null);patchLadderLegend(child,newChild);}used.add(child);
     }
     for(const child of old)if(!used.has(child))child.remove();
+    if(existing.nodeName==='INPUT'&&existing.type==='checkbox')existing.checked=fresh.checked;
+  }
+  const ladderLegendMarkup=new WeakMap();
+  function updateLadderLegend(legend,markup){
+    if(ladderLegendMarkup.get(legend)===markup){legend.dataset.skippedPatches=String(Number(legend.dataset.skippedPatches||0)+1);return;}
+    const before=new Map([...legend.querySelectorAll('[data-vl-legend-entry]')].map(node=>[node.dataset.vlLegendEntry,node]));
+    const fresh=legend.cloneNode(false);fresh.innerHTML=markup;patchLadderLegend(legend,fresh);ladderLegendMarkup.set(legend,markup);
+    const after=[...legend.querySelectorAll('[data-vl-legend-entry]')],retained=after.filter(node=>before.get(node.dataset.vlLegendEntry)===node).length;
+    legend.dataset.patchCount=String(Number(legend.dataset.patchCount||0)+1);legend.dataset.retainedEntries=String(retained);legend.dataset.createdEntries=String(after.length-retained);legend.dataset.removedEntries=String(before.size-retained);
+    if(before.size&&!after.length)legend.dataset.resetCount=String(Number(legend.dataset.resetCount||0)+1);
   }
 
   async function getLadderSpecifiedDay(view,date){
     const cache=view.specifiedLegendCache||=new Map(),requests=view.specifiedLegendRequests||=new Map(),key=date+':'+view.dataVersion;
+    if(date===view.live?.date&&view.liveLegendPayload?.date===date)return view.liveLegendPayload;
     if(cache.has(key))return cache.get(key);if(requests.has(key))return requests.get(key);
     const task=(async()=>{const [result,breaks]=await Promise.all([getLadderPayload(date,1),api('/api/ladder-breaks?start='+date+'&end='+date)]),payload=result.payload;
       if(payload.ladderDataVersion!==view.dataVersion||breaks.ladderDataVersion!==view.dataVersion)throw new Error('行情数据已更新，请刷新天梯后查看图例');
@@ -1983,7 +2007,7 @@
         legendMarkup=[{level:5,label:'高板'},{level:4,label:'四板'},{level:3,label:'三板'},{level:2,label:'二板'},{level:1,label:'首板'}].map(({level,label})=>{const items=[...(groups.get(level)||[])].sort((a,b)=>(collapsed||level===5?Math.max(...b[1].map(stock=>stock.board))-Math.max(...a[1].map(stock=>stock.board)):0)||b[1].length-a[1].length||(totals.get(b[0])||0)-(totals.get(a[0])||0)||a[0].localeCompare(b[0],'zh-CN'));return tierMarkup(level,label,items);}).join('');
         const classified=new Set([...themeStocks.keys(),...data.unpromotedStocks.filter(stock=>stock.date===date).map(stock=>stock.theme)]),broken=new Map();for(const stock of data.brokenStocks.filter(stock=>stock.date===date&&(!collapsed||!classified.has(stock.theme)))){if(!broken.has(stock.theme))broken.set(stock.theme,[]);broken.get(stock.theme).push(stock);}legendMarkup+=tierMarkup(0,'破板',[...broken].sort((a,b)=>b[1].length-a[1].length||a[0].localeCompare(b[0],'zh-CN')));
       }
-      const fresh=legend.cloneNode(false);fresh.innerHTML=legendMarkup;patchLadderLegend(legend,fresh);finishLegendStocks();
+      updateLadderLegend(legend,legendMarkup);finishLegendStocks();
     }
     async function refreshSpecifiedLegend(){
       const date=view.specifiedDay,request=++view.specifiedLegendRequestId;
@@ -1994,7 +2018,7 @@
       try{const data=await getLadderSpecifiedDay(view,date);if(ladderView!==view||view.data!==fullData||!view.specifiedDayEnabled||view.specifiedDay!==date||view.specifiedLegendRequestId!==request)return;view.specifiedLegendPayload=data;
         if(ladderStockHoverContext?.view===view)for(const stock of [...data.sealedStocks,...data.unpromotedStocks,...data.brokenStocks])ladderStockHoverContext.stocks.set(stock.id,stock);
         renderSpecifiedLegend();
-      }catch(error){if(ladderView===view&&view.specifiedDayEnabled&&view.specifiedDay===date&&view.specifiedLegendRequestId===request){view.specifiedLegendPayload=null;renderSpecifiedLegend('指定日读取失败，请重新选择');}}
+      }catch(error){if(ladderView===view&&view.specifiedDayEnabled&&view.specifiedDay===date&&view.specifiedLegendRequestId===request){if(view.specifiedLegendPayload?.date!==date)view.specifiedLegendPayload=null;renderSpecifiedLegend('指定日读取失败，请重新选择');}}
     }
 
     function renderVisibleLegend(){
@@ -2043,7 +2067,7 @@
       const classifiedThemes=new Set([...(fullData.sealedStocks||[]),...(fullData.unpromotedStocks||[])].filter(stock=>visibleDays.has(stock.date)).map(stock=>stock.theme));
       const breakStats=new Map();for(const stock of fullData.brokenStocks||[]){if(!visibleDays.has(stock.date)||classifiedThemes.has(stock.theme))continue;if(!breakStats.has(stock.theme))breakStats.set(stock.theme,new Set());breakStats.get(stock.theme).add(stock.code);}
       legendMarkup+=`<section class="vl-legend-tier" aria-label="破板"><h4><input type="checkbox" class="vl-tier-visibility" data-vl-row-level="0" aria-label="显示破板行" ${hiddenLevels.has(0)?'':'checked'}/><button type="button" class="vl-tier-filter" data-vl-break-toggle aria-label="破板：全部展开或收起" aria-expanded="${!view.foldBreakThemes}">破板</button></h4><div class="vl-legend-items">${[...breakStats].filter(([,codes])=>codes.size>1).sort((a,b)=>b[1].size-a[1].size||a[0].localeCompare(b[0],'zh-CN')).map(([theme,codes])=>{const title=theme+' · 首板破板股票去重'+codes.size,countMarkup=`<span class="vl-legend-count" style="--theme-color:${themeColor(theme)};--legend-count-size:${Math.min(26,12+2*Math.sqrt(Math.max(0,codes.size-1))).toFixed(1)}px">${codes.size}</span>`,topicMarkup=`<span class="vl-legend-topic-name" data-vl-topic-dates="${esc(JSON.stringify([...visibleDays].sort()))}" data-vl-topic="${esc(theme)}" data-vl-topic-date="${legendTopicDates.get(theme)||lastDay}">${esc(theme)}</span>`;return legendThemeEntry(0,theme,countMarkup,topicMarkup,title,(legendMembersByTheme.get(theme)||[]).filter(stock=>stock.status==='broken'));}).join('')}</div></section>`;
-      const fresh=legend.cloneNode(false);fresh.innerHTML=legendMarkup;patchLadderLegend(legend,fresh);finishLegendStocks();host.dataset.legendMs=(performance.now()-legendStarted).toFixed(1);
+      updateLadderLegend(legend,legendMarkup);finishLegendStocks();host.dataset.legendMs=(performance.now()-legendStarted).toFixed(1);
     }
     view.updateLegend=()=>{if(view.legendFrame)cancelAnimationFrame(view.legendFrame);view.legendFrame=requestAnimationFrame(()=>{view.legendFrame=0;renderVisibleLegend();});};
     legend.onchange=event=>{const all=event.target.closest('[data-vl-legend-stock-all]');if(all){event.stopPropagation();view.legendStocksAll=all.checked;view.legendStockOverrides.clear();view.legendStockErrors.clear();view.refreshLegendStocks();return;}const input=event.target.closest('[data-vl-row-level]');if(!input)return;const level=Number(input.dataset.vlRowLevel);if(input.checked)hiddenLevels.delete(level);else hiddenLevels.add(level);const top=host.scrollTop;paintLimitupLadder(fullData);host.scrollTop=Math.min(top,Math.max(0,host.scrollHeight-host.clientHeight));view.updateLegend?.();};
