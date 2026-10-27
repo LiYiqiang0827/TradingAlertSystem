@@ -1122,7 +1122,7 @@ def stock_daily_payload(code,date,basis=None):
             'latestDate':basis['latestDate'],'seriesReferenceDate':today,'preloadVersion':1}
 
 
-def stock_preview(code,date,show_latest=False):
+def stock_preview(code,date,show_latest=False,fifteen_future_days=15):
     """Read the three hover series concurrently; share cache keys with full pages."""
     version=stock_data_version()
     def load():
@@ -1136,7 +1136,7 @@ def stock_preview(code,date,show_latest=False):
                 following=[str(row[0]) for row in c.execute(
                     "SELECT cal_date FROM tbl_cn_tradecal WHERE exchange='SSE' AND is_open=1 AND cal_date>? AND cal_date<=? ORDER BY cal_date LIMIT 15",(date,today))]
             one_end=following[min(5,len(following))-1] if following else date
-            fifteen_end=following[-1] if following else date
+            fifteen_end=following[min(fifteen_future_days,len(following))-1] if following else date
         basis_future=_chart_read_pool.submit(stock_series_latest,code,today,True,date)
         base=latest_anchor(BASIC_DB,code,today)[1]
         basis_tag=f"{today}:{base}:{version['stockDataVersion']}"
@@ -1144,7 +1144,7 @@ def stock_preview(code,date,show_latest=False):
         fifteen_key=f'series:v6:{code}:fifteen-minute:3m:qfq:{basis_tag}:{date}'
         if show_latest:
             one_key+=f':forward5:v2:{one_end}'
-            fifteen_key+=f':forward15:{fifteen_end}'
+            fifteen_key+=f':forward{fifteen_future_days}:{fifteen_end}'
         keys=[one_key,fifteen_key];cached=dict(zip(keys,CACHE.get_many(keys)))
         one_future=_chart_read_pool.submit(cached_intraday_windows,code,'oneMin',{
             one_key:((end-datetime.timedelta(days=14)).strftime('%Y%m%d'),one_end,7*86400)},basis_future,cached)
@@ -1155,12 +1155,12 @@ def stock_preview(code,date,show_latest=False):
         if errors:raise RuntimeError(next(iter(errors.values())))
         fifteen=fifteen_windows[fifteen_key];daily=stock_daily_payload(code,date,basis)
         if show_latest:daily['daily']=basis['daily']
-        chart_window={'mode':'latest' if show_latest else 'analysis','oneMinEnd':one_end,'fifteenMinEnd':fifteen_end,'referenceDate':date,'throughDate':today}
+        chart_window={'mode':'latest' if show_latest else 'analysis','oneMinEnd':one_end,'fifteenMinEnd':fifteen_end,'referenceDate':date,'throughDate':today,'fifteenFutureDays':fifteen_future_days if show_latest else 0}
         if stock_data_version()['stockDataVersion']!=version['stockDataVersion']:raise RuntimeError('Chart source changing; temporarily unavailable')
         return {**daily,'oneMin':one['bars'],'fifteenMin':fifteen['bars'],'suspendedDays':one['suspendedDays'],
                 'coverage':{'oneMinBars':len(one['bars']),'fifteenBars':len(fifteen['bars']),'fifteenError':None},
                 'previewVersion':1,'chartSeriesVersion':7,'chartWindow':chart_window}
-    payload,hit=cached_stock_response('stock-preview:v3:'+code+':'+date+':'+str(bool(show_latest))+':'+version['stockDataVersion'],load)
+    payload,hit=cached_stock_response('stock-preview:v4:'+code+':'+date+':'+str(bool(show_latest))+':'+str(fifteen_future_days)+':'+version['stockDataVersion'],load)
     return {**payload,**version},hit
 
 
@@ -2825,7 +2825,9 @@ class Handler(SimpleHTTPRequestHandler):
             if u.path=="/api/stock-preview":
                 code=q.get('code',[''])[0];date=safe_date(q.get('date',[''])[0])
                 if not re.fullmatch(r'\d{6}\.(SH|SZ|BJ)',code):raise ValueError('股票代码无效')
-                payload,hit=stock_preview(code,date,show_latest=q.get('showLatest',['0'])[0]=='1')
+                future_days=int(q.get('fifteenFutureDays',['15'])[0])
+                if future_days not in (5,15):return self.send_json({'error':'分钟窗口参数无效'},400)
+                payload,hit=stock_preview(code,date,show_latest=q.get('showLatest',['0'])[0]=='1',fifteen_future_days=future_days)
                 return self.send_json(payload,headers={'X-Chart-Cache':'process-memory' if hit else 'source-load'})
             if u.path=="/api/stock-daily-preload":
                 date=safe_date(q.get('date',[''])[0]);codes=list(dict.fromkeys(q.get('codes',[''])[0].split(',')))
