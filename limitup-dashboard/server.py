@@ -1118,31 +1118,45 @@ def stock_daily_payload(code,date,basis=None):
             'latestDate':basis['latestDate'],'seriesReferenceDate':today,'preloadVersion':1}
 
 
-def stock_preview(code,date):
+def stock_preview(code,date,show_latest=False):
     """Read the three hover series concurrently; share cache keys with full pages."""
     version=stock_data_version()
     def load():
         from stock_period_basis import latest_anchor
         end=datetime.datetime.strptime(date,'%Y%m%d').date();today=live_market_status()['date']
+        # Window endpoints follow exchange sessions, never the number of bars returned
+        # (suspensions must not extend a five-session review window).
+        one_end=fifteen_end=date
+        if show_latest:
+            with closing(sqlite3.connect(f'file:{BASIC_DB}?mode=ro',uri=True,timeout=3)) as c:
+                following=[str(row[0]) for row in c.execute(
+                    "SELECT cal_date FROM tbl_cn_tradecal WHERE exchange='SSE' AND is_open=1 AND cal_date>? AND cal_date<=? ORDER BY cal_date LIMIT 15",(date,today))]
+            one_end=following[min(5,len(following))-1] if following else date
+            fifteen_end=following[-1] if following else date
         basis_future=_chart_read_pool.submit(stock_series_latest,code,today,True,date)
         base=latest_anchor(BASIC_DB,code,today)[1]
         basis_tag=f"{today}:{base}:{version['stockDataVersion']}"
         one_key=f'series:v7:{code}:minute:5d:qfq:{basis_tag}:{date}'
         fifteen_key=f'series:v6:{code}:fifteen-minute:3m:qfq:{basis_tag}:{date}'
+        if show_latest:
+            one_key+=f':forward5:v2:{one_end}'
+            fifteen_key+=f':forward15:{fifteen_end}'
         keys=[one_key,fifteen_key];cached=dict(zip(keys,CACHE.get_many(keys)))
         one_future=_chart_read_pool.submit(cached_intraday_windows,code,'oneMin',{
-            one_key:((end-datetime.timedelta(days=14)).strftime('%Y%m%d'),date,7*86400)},basis_future,cached)
+            one_key:((end-datetime.timedelta(days=14)).strftime('%Y%m%d'),one_end,7*86400)},basis_future,cached)
         fifteen_future=_chart_read_pool.submit(cached_intraday_windows,code,'fifteenMin',{
-            fifteen_key:(shift_months(end,3).strftime('%Y%m%d'),date,7*86400)},basis_future,cached)
+            fifteen_key:(shift_months(end,3).strftime('%Y%m%d'),fifteen_end,7*86400)},basis_future,cached)
         basis=basis_future.result();one=one_future.result()[0][one_key]
         fifteen_windows,errors=fifteen_future.result()
         if errors:raise RuntimeError(next(iter(errors.values())))
         fifteen=fifteen_windows[fifteen_key];daily=stock_daily_payload(code,date,basis)
+        if show_latest:daily['daily']=basis['daily']
+        chart_window={'mode':'latest' if show_latest else 'analysis','oneMinEnd':one_end,'fifteenMinEnd':fifteen_end,'referenceDate':date,'throughDate':today}
         if stock_data_version()['stockDataVersion']!=version['stockDataVersion']:raise RuntimeError('Chart source changing; temporarily unavailable')
         return {**daily,'oneMin':one['bars'],'fifteenMin':fifteen['bars'],'suspendedDays':one['suspendedDays'],
                 'coverage':{'oneMinBars':len(one['bars']),'fifteenBars':len(fifteen['bars']),'fifteenError':None},
-                'previewVersion':1,'chartSeriesVersion':7}
-    payload,hit=cached_stock_response('stock-preview:v1:'+code+':'+date+':'+version['stockDataVersion'],load)
+                'previewVersion':1,'chartSeriesVersion':7,'chartWindow':chart_window}
+    payload,hit=cached_stock_response('stock-preview:v3:'+code+':'+date+':'+str(bool(show_latest))+':'+version['stockDataVersion'],load)
     return {**payload,**version},hit
 
 
@@ -1373,7 +1387,7 @@ def full_day_suspensions(code, start_date, end_date):
     finally:
         conn.close()
 
-def intraday_with_suspensions(code, start_date, end_date, *, frame=None):
+def intraday_with_suspensions(code, start_date, end_date, *, frame=None, session_limit=5):
     """Return five recent one-minute sessions, filling full-day suspensions at prior close."""
     if frame is None:
         frame=get_oneMin(ts_code=code,start_date=start_date,end_date=end_date)
@@ -1382,7 +1396,8 @@ def intraday_with_suspensions(code, start_date, end_date, *, frame=None):
     frame=filter_after_close(frame)
     suspension_dates=full_day_suspensions(code,start_date.replace("-", ""),end_date.replace("-", ""))
     real_days=sorted(frame["datetime"].astype(str).str[:10].str.replace("-", "", regex=False).unique()) if not frame.empty else []
-    sessions=sorted(set(real_days).union(suspension_dates))[-5:]
+    sessions=sorted(set(real_days).union(suspension_dates))
+    if session_limit is not None:sessions=sessions[-session_limit:]
     if not suspension_dates:
         frame=frame[frame["datetime"].astype(str).str[:10].str.replace("-", "", regex=False).isin(sessions)] if not frame.empty else frame
         return {"bars":compact(frame,"datetime"),"days":sessions,"suspendedDays":[]}
@@ -1485,7 +1500,7 @@ def cached_intraday_windows(code, period, windows, basis, initial_values=None):
                     if identity not in converted:
                         native=frame.loc[days.between(start,end)].copy()
                         if period=="oneMin":
-                            data=adjusted_one_min_payload(intraday_with_suspensions(code,start,end,frame=native),resolved_basis)
+                            data=adjusted_one_min_payload(intraday_with_suspensions(code,start,end,frame=native,session_limit=None if ":forward5:" in key else 5),resolved_basis)
                         else:
                             native=drop_full_day_suspended_bars(filter_after_close(native),code,start,end)
                             data={"bars":adjusted_stock_intraday_bars(compact(native,"datetime"),resolved_basis),
@@ -2802,7 +2817,7 @@ class Handler(SimpleHTTPRequestHandler):
             if u.path=="/api/stock-preview":
                 code=q.get('code',[''])[0];date=safe_date(q.get('date',[''])[0])
                 if not re.fullmatch(r'\d{6}\.(SH|SZ|BJ)',code):raise ValueError('股票代码无效')
-                payload,hit=stock_preview(code,date)
+                payload,hit=stock_preview(code,date,show_latest=q.get('showLatest',['0'])[0]=='1')
                 return self.send_json(payload,headers={'X-Chart-Cache':'process-memory' if hit else 'source-load'})
             if u.path=="/api/stock-daily-preload":
                 date=safe_date(q.get('date',[''])[0]);codes=list(dict.fromkeys(q.get('codes',[''])[0].split(',')))

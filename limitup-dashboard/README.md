@@ -394,3 +394,11 @@ cd ~/TradingAlertSystem/limitup-dashboard
 - 缺少当日官方自由换手率时，使用当前累计成交股数 / 最近有效自由流通股本估算，显示 `≈`；无当前行情时显示横线，较旧行情明确提示延迟。没有在线 tick 的新订阅股票可暂用原生分钟行情，鼠标停在涨幅处可看来源及时间。
 - 当前请求的股票写入 Redis 6380 `online:dashboard:snapshot-demand:YYYYMMDD`（每股 180 秒租期）。TradingDataManager 的 snapshot 采集器将其与原采集股票池合并，继续通过原 Redis Stream/SSE 发送。只扩展股票快照采集，不扩展盘口、分钟下载等其他采集任务。午休保留上午数据，下午采集进程启动时自动加载新逻辑。
 - 后端模块：`live_stock_monitor.py`；前端模块：`live_stocks.js`。同时更新 TradingDataManager 至 `037653a` 或更新版本（`onlineDataManager/scripts/service/service_writeredis_snapshot.py`）。已有 snapshot 进程需重启该采集器；午休由 scheduler 停止的进程会在下午启动时读取新代码。数据库及 Redis 位置沿用原配置，没有新增凭据或依赖包。
+
+### 天梯个股悬浮图：显示最新
+
+天梯工具栏的“显示最新”开关默认关闭，浏览器记住用户选择。只改变个股悬浮窗的行情范围，不影响天梯节点、题材归属、连线或所选日期的基本信息。
+
+开启后，分时图保留所选日及其之前最多 4 个交易日，并增加之后最多 5 个交易日；15 分钟图增加之后最多 15 个交易日；日线显示至最新可用日期。交易日按 SSE 日历计算，均受实际已有数据限制。分钟图用背景突出所选日，日线用黄色横竖线标记所选日收盘。较长后续窗口会自动缩小柱间距，让标记仍在视野内。今日离线数据未到时，沿用现有实时图表接口补充可用行情。
+
+`GET /api/stock-preview?code=600487.SH&date=20260922&showLatest=1` 返回独立缓存的扩展窗口，`chartWindow` 记录两个分钟周期的截止日及原日期。关闭模式仍沿用原有截止日和缓存。悬浮图与普通个股页面的日期设置独立。

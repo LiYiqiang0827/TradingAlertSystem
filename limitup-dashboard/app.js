@@ -608,19 +608,19 @@
   let dailyPreloadGeneration=0,dailyPreloadTimer=0,dailyPreloadController=null;
   function saveStockPreview(code,date,payload){
     if(payload.previewVersion!==1||payload.stockDataVersion!==stockMeta?.stockDataVersion)return;
-    const key='preview:'+date+':'+code,record=chartRecord(key,payload.stockDataVersion,payload,STOCK_CACHE_TTL);
+    const key='preview:'+date+':'+code+(payload.chartWindow?.mode==='latest'?':forward:'+payload.chartWindow.throughDate:''),record=chartRecord(key,payload.stockDataVersion,payload,STOCK_CACHE_TTL);
     stockPreviewMemory.set(key,record);writeChartDisk(record);
   }
-  async function getStockPreview(code,date){
-    const revision=await currentStockDataVersion(),key='preview:'+date+':'+code,requestKey=key+':'+revision;
+  async function getStockPreview(code,date,showLatest=false){
+    const revision=await currentStockDataVersion(),key='preview:'+date+':'+code+(showLatest?':forward:'+shanghaiDateKey():''),requestKey=key+':'+revision;
     if(stockPreviewRequests.has(requestKey))return stockPreviewRequests.get(requestKey);
     const task=(async()=>{
-      const full=await readStockCache(code,date);if(full)return full;
+      const full=!showLatest&&await readStockCache(code,date);if(full)return full;
       let record=stockPreviewMemory.get(key),source='memory';
       if(!record||record.revision!==revision){record=await readChartDisk(key,revision);source='indexeddb';}
       if(record?.revision===revision&&record.payload?.previewVersion===1){stockPreviewMemory.set(key,record);marketCacheSources.set(record.payload,{source});return record.payload;}
       try{
-        const payload=await api('/api/stock-preview?code='+encodeURIComponent(code)+'&date='+date,{cache:'no-store'});
+        const payload=await api('/api/stock-preview?code='+encodeURIComponent(code)+'&date='+date+(showLatest?'&showLatest=1':''),{cache:'no-store'});
         observeStockVersion(payload);saveStockPreview(code,date,payload);marketCacheSources.set(payload,{source:'network'});return payload;
       }catch(error){const prior=await previousChartSnapshot(key,stockPreviewMemory,error);if(prior)return prior;throw error;}
     })();stockPreviewRequests.set(requestKey,task);try{return await task;}finally{if(stockPreviewRequests.get(requestKey)===task)stockPreviewRequests.delete(requestKey);}
@@ -1224,6 +1224,7 @@
     return `<header class="vl-hover-head"><div>${ladderHoverThemeTitle(theme,days.at(-1),true)}<span>${esc(fmtDate(days[0]))}—${esc(fmtDate(days.at(-1)))} · ${days.length}日</span></div></header><div class="vl-hover-scroll"><table><colgroup><col style="width:30px"/>${days.map(()=>'<col/>').join('')}</colgroup><thead><tr><th>板数</th>${days.map(day=>`<th>${day.slice(4,6)}/${day.slice(6)}</th>`).join('')}</tr></thead><tbody>${tiers.map(tier=>`<tr><th scope="row">${tier.label}</th>${days.map(day=>{const members=(cells.get(day+':'+tier.level)||[]).sort((a,b)=>(a.status==='sealed'?0:1)-(b.status==='sealed'?0:1)||Number(b.board||b.previousBoard||0)-Number(a.board||a.previousBoard||0)||(a.time||'99:99:99').localeCompare(b.time||'99:99:99')||a.name.localeCompare(b.name,'zh-CN'));return `<td>${members.length?members.map(stock=>`<span class="wl-stock-pair"><button type="button" class="vl-hover-stock" data-vl-range-hover-stock="${esc(stock.id)}" title="${esc(stock.name+' · '+fmtDate(stock.date)+' · '+(stock.status==='sealed'?stock.boardPeriod:stock.status==='unpromoted'?'未晋级':'破板'))}">${stock.status==='sealed'?ladderHoverBoardBadge(stock):ladderHoverOutcomeBadge(stock)}<span data-vl-stock-preview="${esc(stock.id)}"${isLadderGrowthStock(stock.code)?' class="vl-hover-growth-name"':''}>${esc(stock.name)}</span></button>${Watchlists.button(stock)}</span>`).join(''):'<span class="vl-range-empty">—</span>'}</td>`;}).join('')}</tr>`).join('')}</tbody></table></div>`;
   }
   let ladderStockHover=null,ladderStockHoverContext=null;
+  let ladderShowLatest=localStorage.getItem('ladderShowLatest')==='true';
   const ladderStockHoverRequests=new Map();
   const ladderStockPreviewSelector='#ladderLegend .vl-legend-stock-name[data-vl-stock-preview],#ladderChart [data-vl-stock-link],#ladderChart [data-vl-unpromoted-link],#ladderChart [data-vl-broken-link],#ladderTopicHover [data-vl-stock-preview],#ladderNestedThemeHover [data-vl-stock-preview]';
   function flushPendingLiveLadder(){
@@ -1235,7 +1236,7 @@
   }
 
   const hoverSeriesCache=new WeakMap(),hoverChartPool=new Map();let hoverPoolTimer=0,hoverParking=null;
-  function hoverPoolKey(kind,code,date){return kind+':'+date+':'+code;}
+  function hoverPoolKey(kind,code,date){return kind+':'+date+':'+code+(kind==='stock'&&ladderShowLatest?':forward':'');}
   function disposeHoverRecord(record){for(const id of record.ids)try{window.klinecharts.dispose(id);}catch{}record.node.remove();}
   function pruneHoverChartPool(){
     clearTimeout(hoverPoolTimer);const now=Date.now();for(const [key,record] of hoverChartPool)if(record.deadline<=now){disposeHoverRecord(record);hoverChartPool.delete(key);}
@@ -1268,7 +1269,7 @@
     else{
       hover.card.insertAdjacentHTML('beforeend',`<div class="vl-stock-preview-charts">${specs.map(([period,title,bars])=>`<section class="vl-stock-preview-chart ${period==='oneMin'?'vl-stock-preview-wide':''}"><h4${period==='daily'&&hover.stock?' class="vl-stock-preview-daily-heading"':''}>${title}${period==='daily'&&hover.stock?ladderStockDailyQuote(hover.stock,payload,bars):`<span>${period==='oneMin'?days.length+'日':bars.length+'根'}</span>`}</h4><div id="${prefix+period}" class="vl-stock-preview-mount" data-preview-period="${period}" data-preview-bars="${bars.length}" data-preview-last-day="${bars.length?chartDayKey(bars.at(-1)):''}"></div></section>`).join('')}</div>`);
       hover.entries=new Map();positionLadderStockHover(hover.anchor,hover.card);
-      for(const [period,,bars] of specs){const id=prefix+period;hover.chartIds.push(id);const chart=drawChart(id,bars,period,identity,date,daily,payload.suspendedDays||[],{compact:true,detached:true,line:period==='oneMin',minBarSpace:.1,endAtLatest:true,isIndex,liveSession:payload.isLive&&period==='oneMin'});if(chart){hover.charts.push(chart);hover.entries.set(period,{id,chart});}}
+      for(const [period,,bars] of specs){const id=prefix+period;hover.chartIds.push(id);const chart=drawChart(id,bars,period,identity,date,daily,payload.suspendedDays||[],{compact:true,detached:true,line:period==='oneMin',minBarSpace:.1,endAtLatest:true,showReferenceWindow:payload.chartWindow?.mode==='latest',isIndex,liveSession:payload.isLive&&period==='oneMin'});if(chart){hover.charts.push(chart);hover.entries.set(period,{id,chart});}}
       hover.lastSignature=hoverPayloadSignature(payload);hover.lastPayload=payload;
     }
     positionLadderStockHover(hover.anchor,hover.card);if(warm){updateHoverCharts(hover,payload,date);for(const [period,entry] of hover.entries){const view=warm.viewport.get(period);entry.chart.resize();if(view?.space>0)entry.chart.setBarSpace(view.space);entry.chart.setOffsetRightDistance(0);entry.chart.scrollToRealTime(0);}}
@@ -1276,8 +1277,10 @@
   }
   function hoverChartSeries(payload,date){
     let stored=hoverSeriesCache.get(payload);if(stored?.date===date)return stored.series;
-    const daily=(payload.daily||[]).filter(bar=>chartDayKey(bar)<=date),minute=(payload.oneMin||[]).filter(bar=>chartDayKey(bar)<=date),days=[...new Set(minute.map(chartDayKey))].sort().slice(-5);
-    const series={daily,days,specs:[['oneMin','5日分时',minute.filter(bar=>days.includes(chartDayKey(bar)))],['daily','日K',daily],['fifteenMin','15分钟K线',(payload.fifteenMin||[]).filter(bar=>chartDayKey(bar)<=date)]]};hoverSeriesCache.set(payload,{date,series});return series;
+    const forward=payload.chartWindow?.mode==='latest',window=payload.chartWindow||{};
+    const daily=(payload.daily||[]).filter(bar=>forward||chartDayKey(bar)<=date),minute=(payload.oneMin||[]).filter(bar=>chartDayKey(bar)<=(forward?window.oneMinEnd:date));
+    const pastDays=[...new Set(minute.filter(bar=>chartDayKey(bar)<=date).map(chartDayKey))].sort().slice(-5),shownMinute=minute.filter(bar=>pastDays.includes(chartDayKey(bar))||(forward&&chartDayKey(bar)>date)),days=[...new Set(shownMinute.map(chartDayKey))].sort();
+    const series={daily,days,specs:[['oneMin',forward?'分时 · 后5日':'5日分时',shownMinute],['daily','日K',daily],['fifteenMin',forward?'15分钟 · 后15日':'15分钟K线',(payload.fifteenMin||[]).filter(bar=>chartDayKey(bar)<=(forward?window.fifteenMinEnd:date))]]};hoverSeriesCache.set(payload,{date,series});return series;
   }
   function updateHoverCharts(hover,payload,date){
     const series=hoverChartSeries(payload,date),signature=hoverPayloadSignature(payload);if(hover.lastSignature===signature){hover.lastPayload=payload;return series;}hover.lastSignature=signature;hover.lastPayload=payload;
@@ -1285,12 +1288,12 @@
       let entry=hover.entries?.get(key);
       if(!entry&&bars.length){
         const mount=hover.card.querySelector('[data-preview-period="'+key+'"]');if(!mount)continue;mount.replaceChildren();
-        const chart=drawChart(mount.id,bars,key,hover.identity,date,series.daily,payload.suspendedDays||[],{compact:true,detached:true,line:key==='oneMin',minBarSpace:.1,endAtLatest:true,isIndex:hover.isIndex,liveSession:payload.isLive&&key==='oneMin'});
+        const chart=drawChart(mount.id,bars,key,hover.identity,date,series.daily,payload.suspendedDays||[],{compact:true,detached:true,line:key==='oneMin',minBarSpace:.1,endAtLatest:true,showReferenceWindow:payload.chartWindow?.mode==='latest',isIndex:hover.isIndex,liveSession:payload.isLive&&key==='oneMin'});
         if(chart){entry={id:mount.id,chart};hover.entries.set(key,entry);hover.charts.push(chart);}
       }
       if(!entry)continue;
       // Keep the existing canvas and window open while replacing its data.
-      const plotted=key==='oneMin'?completeLiveSessionAxis(bars,date):bars;
+      const plotted=key==='oneMin'&&payload.isLive?completeLiveSessionAxis(bars,date):bars;
       entry.chart.setDataLoader({getBars:({callback})=>callback(plotted,false)});
       const mount=document.getElementById(entry.id);if(mount)configureChartFacts(entry.chart,mount,key,plotted,series.daily,date,{detached:true});if(mount){mount.dataset.previewBars=String(bars.length);mount.dataset.previewLastDay=bars.length?chartDayKey(bars.at(-1)):'';mount.dataset.previewLastTime=String(bars.at(-1)?.timestamp||'');if(key==='oneMin'){mount.dataset.lastQuoteTime=String(bars.at(-1)?.timestamp||'');mount.dataset.sessionEnd=String(plotted.at(-1)?.timestamp||'');}}
       const last=bars.filter(bar=>chartDayKey(bar)===date).at(-1);if(last)entry.chart.overrideOverlay({id:'selected-limitup-close-'+key,points:[{timestamp:last.timestamp,value:last.close}]});
@@ -1317,9 +1320,20 @@
     }else y=Math.max(margin,Math.min(box.top-margin,window.innerHeight-size.height-margin));
     card.style.left=x/zoom+'px';card.style.top=Math.max(margin,y)/zoom+'px';
   }
-  async function getLadderStockChartData(stock,{force=false}={}){
+  async function getLadderStockChartData(stock,{force=false,historicalOnly=false}={}){
     const code=canonicalStockCode(stock.code),date=stock.date,key=date+':'+code;
-    if(date!==shanghaiDateKey())return getStockPreview(code,date);
+    if(date!==shanghaiDateKey()){
+      if(!ladderShowLatest||historicalOnly)return getStockPreview(code,date);
+      const preview=await getStockPreview(code,date,true);
+      // Keep facts and chart anchors on the review day; only append available
+      // current-day bars, bounded independently for each requested timeframe.
+      try{
+        const latest=await getLadderStockChartData({...stock,date:shanghaiDateKey()},{force,historicalOnly:true}),window=preview.chartWindow;
+        const merge=(key,end)=>{const rows=new Map((preview[key]||[]).map(bar=>[bar.timestamp,bar]));for(const bar of latest[key]||[])if(chartDayKey(bar)===shanghaiDateKey()&&chartDayKey(bar)<=end)rows.set(bar.timestamp,bar);return [...rows.values()].sort((a,b)=>a.timestamp-b.timestamp);};
+        const payload={...preview,daily:merge('daily',window.throughDate),oneMin:merge('oneMin',window.oneMinEnd),fifteenMin:merge('fifteenMin',window.fifteenMinEnd)};
+        marketCacheSources.set(payload,marketCacheSources.get(preview)||{source:'network'});return payload;
+      }catch(error){console.warn('最新盘中数据暂不可用，保留离线行情',error);return preview;}
+    }
     const revision=await currentStockDataVersion(),diskKey='live:'+key,epoch=liveStockDirty.peek(key)||0;
     if(!force){
       let record=liveStockMemoryCache.get(key),source='memory';
@@ -1386,7 +1400,7 @@
     hover.card.setAttribute('aria-label',stock.name+' · 基本信息与行情');hover.card.dataset.stock=stock.code;hover.card.dataset.date=stock.date;for(const field of ['cacheSource','loadMs','renderMs','chartReused','dailyReadyMs','dailyPreloaded'])delete hover.card.dataset[field];hover.card.innerHTML=ladderStockPreviewInfo(stock,null)+'<div class="vl-stock-preview-loading" aria-live="polite">正在读取行情…</div>';hover.card.hidden=false;positionLadderStockHover(anchor,hover.card);
     let complete=false;
     // Show already-preloaded daily bars while native minute requests finish.
-    if(!hoverChartPool.has(hoverPoolKey('stock',stock.code,stock.date)))readDailyPreview(stock.code,stock.date).then(preview=>{
+    if(!ladderShowLatest&&!hoverChartPool.has(hoverPoolKey('stock',stock.code,stock.date)))readDailyPreview(stock.code,stock.date).then(preview=>{
       if(!preview||complete||requestId!==hover.requestId||hover.anchor!==anchor||!anchor.isConnected)return;
       hover.stock=stock;mountHoverCharts(hover,preview,stock.date,stock.code,ladderStockPreviewInfo(stock,null));
       hover.card.dataset.dailyReadyMs=(performance.now()-loadStarted).toFixed(1);hover.card.dataset.dailyPreloaded='true';
@@ -1650,7 +1664,12 @@
     $('#crumbCurrent').textContent='涨停天梯';$('#crumbCurrent').hidden=false;$('#crumbBack').hidden=true;$('#crumbWorkspace').hidden=true;$('#crumbSeparator').hidden=true;
     const requested=history.state?.ladderEnd||new URL(location.href).searchParams.get('ladderEnd')||new URL(location.href).searchParams.get('ladderStart'),end=state.dates.includes(requested)?state.dates.indexOf(requested):state.dates.length-1,endDay=state.dates[end];
     $('#topbarActions').replaceChildren();
-    content.innerHTML=`<div class="ladder-page ladder-vertical"><aside class="vl-controls"><div class="vl-toolbar"><div class="ladder-heading"><h1>涨停天梯</h1></div><span id="ladderLoadStatus" class="vl-load-status" aria-live="polite" hidden></span></div><div id="ladderDetail" class="ladder-detail" aria-live="polite" hidden></div><div class="vl-specified-day-controls"><label><input id="ladderSpecifiedDayEnabled" type="checkbox" checked/><span>指定日</span></label>${datePickerTriggerMarkup('ladderSpecifiedDay','date-nav-button',endDay)}</div><div id="ladderLegend" class="ladder-legend" aria-label="题材图例"></div></aside><section class="vl-plot"><div class="vl-plot-toolbar" role="toolbar" aria-label="天梯控制工具栏"><div class="vl-plot-toolbar-leading"><div id="ladderSearch" class="vl-ladder-search"><button id="ladderSearchToggle" class="vl-search-toggle" type="button" title="搜索股票或题材" aria-label="搜索股票或题材" aria-expanded="false" aria-controls="ladderSearchPanel"><svg viewBox="0 0 20 20" width="15" height="15" aria-hidden="true"><circle cx="8.2" cy="8.2" r="5.1"/><path d="m12 12 4.8 4.8"/></svg></button><div id="ladderSearchPanel" class="vl-search-panel" role="dialog" aria-label="天梯搜索" hidden><input id="ladderSearchInput" type="search" role="combobox" aria-label="股票名或题材名" aria-autocomplete="list" aria-expanded="false" aria-controls="ladderSearchResults" autocomplete="off" placeholder="股票名或题材名"/><div id="ladderSearchResults" class="vl-search-results" role="listbox" aria-label="搜索结果"></div></div></div><span id="ladderToolbarRange" class="vl-toolbar-range" aria-live="polite"></span><span id="ladderLiveStatus" class="vl-live-status" hidden></span><button id="ladderShowAll" class="vl-calendar-show-all" type="button" title="显示全部题材并展开列表" aria-label="显示全部题材并展开列表">全</button><button id="ladderToggleSummaries" class="vl-summary-toggle" type="button" aria-label="展开未晋级和其他题材">展开</button></div><div class="vl-plot-toolbar-actions"><div class="review-date-controls topbar-date-controls"><button id="prevLadderDate" class="date-nav-button" type="button">← 前一日</button>${datePickerTriggerMarkup('ladderDatePickerTrigger','date-nav-button',endDay)}<button id="nextLadderDate" class="date-nav-button" type="button">后一日 →</button></div><button id="openSettings" class="settings-button" type="button" aria-label="设置" title="设置">⚙️</button></div></div><div id="ladderChart" class="ladder-chart" aria-busy="true"><div class="loading"><span class="spinner"></span><p>正在读取晋级路径…</p></div></div></section></div>`;
+    content.innerHTML=`<div class="ladder-page ladder-vertical"><aside class="vl-controls"><div class="vl-toolbar"><div class="ladder-heading"><h1>涨停天梯</h1></div><span id="ladderLoadStatus" class="vl-load-status" aria-live="polite" hidden></span></div><div id="ladderDetail" class="ladder-detail" aria-live="polite" hidden></div><div class="vl-specified-day-controls"><label><input id="ladderSpecifiedDayEnabled" type="checkbox" checked/><span>指定日</span></label>${datePickerTriggerMarkup('ladderSpecifiedDay','date-nav-button',endDay)}</div><div id="ladderLegend" class="ladder-legend" aria-label="题材图例"></div></aside><section class="vl-plot"><div class="vl-plot-toolbar" role="toolbar" aria-label="天梯控制工具栏"><div class="vl-plot-toolbar-leading"><div id="ladderSearch" class="vl-ladder-search"><button id="ladderSearchToggle" class="vl-search-toggle" type="button" title="搜索股票或题材" aria-label="搜索股票或题材" aria-expanded="false" aria-controls="ladderSearchPanel"><svg viewBox="0 0 20 20" width="15" height="15" aria-hidden="true"><circle cx="8.2" cy="8.2" r="5.1"/><path d="m12 12 4.8 4.8"/></svg></button><div id="ladderSearchPanel" class="vl-search-panel" role="dialog" aria-label="天梯搜索" hidden><input id="ladderSearchInput" type="search" role="combobox" aria-label="股票名或题材名" aria-autocomplete="list" aria-expanded="false" aria-controls="ladderSearchResults" autocomplete="off" placeholder="股票名或题材名"/><div id="ladderSearchResults" class="vl-search-results" role="listbox" aria-label="搜索结果"></div></div></div><span id="ladderToolbarRange" class="vl-toolbar-range" aria-live="polite"></span><span id="ladderLiveStatus" class="vl-live-status" hidden></span><button id="ladderShowAll" class="vl-calendar-show-all" type="button" title="显示全部题材并展开列表" aria-label="显示全部题材并展开列表">全</button><button id="ladderToggleSummaries" class="vl-summary-toggle" type="button" aria-label="展开未晋级和其他题材">展开</button></div><div class="vl-plot-toolbar-actions"><button id="ladderShowLatest" class="vl-latest-toggle" type="button" role="switch" aria-checked="${ladderShowLatest}" title="个股悬浮图：分时后5个交易日、15分钟后15个交易日、日线至最新"><span class="vl-latest-track" aria-hidden="true"><i></i></span>显示最新</button><div class="review-date-controls topbar-date-controls"><button id="prevLadderDate" class="date-nav-button" type="button">← 前一日</button>${datePickerTriggerMarkup('ladderDatePickerTrigger','date-nav-button',endDay)}<button id="nextLadderDate" class="date-nav-button" type="button">后一日 →</button></div><button id="openSettings" class="settings-button" type="button" aria-label="设置" title="设置">⚙️</button></div></div><div id="ladderChart" class="ladder-chart" aria-busy="true"><div class="loading"><span class="spinner"></span><p>正在读取晋级路径…</p></div></div></section></div>`;
+    $('#ladderShowLatest').onclick=event=>{
+      ladderShowLatest=!ladderShowLatest;localStorage.setItem('ladderShowLatest',String(ladderShowLatest));event.currentTarget.setAttribute('aria-checked',String(ladderShowLatest));
+      // Range changes never rebuild ladder nodes, themes or edges.
+      closeLadderStockHover();
+    };
     $('#prevLadderDate').onclick=()=>moveLadderDate(-1);$('#nextLadderDate').onclick=()=>moveLadderDate(1);$('#openSettings').onclick=openSettings;updateLadderDateControls(endDay);renderNav();window.scrollTo(0,0);
     const view=ladderView={id,end,endDay,focusedStock:retainedStockFocus,stockOnly:retainedStockOnly,compactTheme:retainedStockTheme,compactThemes:retainedStockTheme?[retainedStockTheme]:[],legendStocksAll:retainedLegendStocks?.all??false,legendStockOverrides:retainedLegendStocks?.overrides||new Map(),low:end,high:end,loading:false,specifiedDayEnabled:true,specifiedDay:endDay,legendCollapsed:true,sealed:new Map(),outcomes:new Map(),links:new Map(),relimitLinks:new Map(),suspensionCarry:new Map(),unpromoted:new Map(),expandedUnpromoted:new Set(),aggregateInitialized:new Set(),hiddenLevels:new Set(),foldOtherThemes:true,foldBreakThemes:true,foldSecondFailed:true,foldHigherFailed:true,broken:new Map(),brokenDates:new Set(),previousDates:{},days:new Set(),data:null};
     setupLadderSearch(view);
@@ -2597,6 +2616,10 @@
           const marker=key==='weekly'||key==='monthly'?periodMarker:data.filter(bar=>inChartPeriod(chartDayKey(bar),anchor,key)).at(-1);
           if(marker)chart.createOverlay({name:'verticalStraightLine',id:'selected-limitup-date-'+key,groupId:'selected-limitup-date',paneId:'candle_pane',lock:true,needDefaultPointFigure:false,needDefaultXAxisFigure:true,needDefaultYAxisFigure:false,points:[{timestamp:marker.timestamp}],styles:{line:{color:'#f0c451',size:.8,style:'dashed',dashedValue:[4,3]}}});
         }
+      }
+      if(options.showReferenceWindow&&['daily','fifteenMin'].includes(key)){
+        const anchorIndex=data.findIndex(bar=>chartDayKey(bar)===String(analysisDate).replaceAll('-',''));
+        if(anchorIndex>=0){const fit=Math.max(.1,(host.clientWidth-90)/(data.length-anchorIndex+8));chart.setLayoutOptions({barSpaceLimit:{min:.1,max:50}});chart.setBarSpace(Math.min(chart.getBarSpace().bar,fit));}
       }
       if(analysisDate&&!state.latestMode&&!options.endAtLatest){let target=-1;data.forEach((bar,index)=>{if(chartDayKey(bar)<=String(analysisDate).replaceAll('-',''))target=index;});if(target>=0)chart.scrollToDataIndex(target,0);else chart.scrollToRealTime();}else{chart.setOffsetRightDistance(0);chart.scrollToRealTime();}configureChartFacts(chart,host,key,data,dailyBars||[],analysisDate,options);return chart;}catch(e){console.error(e);host.innerHTML=`<div class="empty-state">图表加载失败：${esc(e.message)}</div>`;}}
   function syncSettingsOptions(){document.querySelectorAll('#uiScaleOptions [data-scale]').forEach(button=>button.classList.toggle('active',button.dataset.scale===state.uiScalePreference));document.querySelectorAll('#chartLayoutOptions [data-layout]').forEach(button=>button.classList.toggle('active',button.dataset.layout===state.chartLayout));document.querySelectorAll('#stockDateModeOptions [data-mode]').forEach(button=>button.classList.toggle('active',button.dataset.mode===(state.index?(state.latestMode?'latest':'analysis'):state.stockDatePreference)));}
