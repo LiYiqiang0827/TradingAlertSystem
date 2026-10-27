@@ -43,6 +43,8 @@ def watchlists_store():
 
 from live_stock_monitor import LiveStockMonitor
 LIVE_STOCK_MONITOR=LiveStockMonitor(sys.modules[__name__])
+from limitup_tracking import LimitupTracking
+LIMITUP_TRACKING=LimitupTracking(sys.modules[__name__])
 
 LADDER_STORE=LimitupLadderStore()
 _ladder_dates_snapshot=None
@@ -2522,6 +2524,7 @@ class Handler(SimpleHTTPRequestHandler):
     def do_GET(self):
         u=urlparse(self.path); q=parse_qs(u.query)
         try:
+            if u.path=='/api/limitup-tracking':return self.send_json(LIMITUP_TRACKING.data(safe_date(q.get('date',[''])[0])))
             if u.path=='/api/watchlists':return self.send_json(watchlists_store().snapshot())
             if u.path=='/api/live-monitor-stocks':
                 return self.send_json(LIVE_STOCK_MONITOR.page(int(q.get('offset',['0'])[0]),int(q.get('limit',['30'])[0]),int(q.get('days',['20'])[0]),q.get('rosterId',[''])[0]))

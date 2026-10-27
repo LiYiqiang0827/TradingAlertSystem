@@ -456,6 +456,7 @@
         for(const cache of [ladderDateDetailCache,ladderTopicDetailCache])for(const key of cache.keys())if(key.startsWith((liveStatus?.date||shanghaiDateKey())+':'))cache.delete(key);
       }
       if(ladderView&&history.state?.view==='ladder'&&(resync||['snapshot','limitperformance','zt','break'].some(kind=>kinds.has(kind))))jobs.push(refreshLiveLadder(pending.ladderStatus,resync));
+      if(history.state?.view==='tracking'&&state.date===shanghaiDateKey()&&Date.now()-(trackingMemory.peek(state.date)?.at||0)>=10000&&(resync||['snapshot','limitperformance','zt','break'].some(kind=>kinds.has(kind))))jobs.push(loadLimitupTracking({force:true}));
       if(isLivePage()&&(resync||['snapshot_index','zt','break'].some(kind=>kinds.has(kind))))jobs.push(refreshLivePage());
       if(resync||kinds.has('snapshot_index'))jobs.push(refreshPushedHover(indexHover));
       if(resync||codes.has(ladderStockHover?.card.dataset.stock)||kinds.has('minute'))jobs.push(refreshPushedHover(ladderStockHover));
@@ -822,6 +823,7 @@
   }
   function renderNav(){
     if(!isLivePage())disposeLiveIndexCharts();
+    if(history.state?.view!=='tracking')trackingMiniObserver?.disconnect();
     const dailyCount=state.review?.lightweight?(state.review.navigationTopicCount??'—'):(state.review?.topics?.length||0);
     const markup=`<div class="topic-group ladder-nav-group"><button class="topic-button overview-nav-button" type="button" data-ladder><span class="overview-nav-icon">梯</span><span class="topic-label">涨停天梯</span></button></div><div class="topic-group tracking-nav-group"><button class="topic-button overview-nav-button" type="button" data-tracking><span class="overview-nav-icon">跟</span><span class="topic-label">涨停跟踪</span></button></div><div class="topic-group overview-nav-group"><button class="topic-button overview-nav-button" type="button" data-overview><span class="overview-nav-icon">${dailyCount}</span><span class="topic-label">每日总览</span></button></div><div class="topic-group index-nav-group"><button class="topic-button index-nav-button" type="button" data-indices><span class="index-nav-icon">指</span><span class="topic-label">重要指数</span></button></div>`;
     if(markup!==renderedNavMarkup){
@@ -2461,8 +2463,49 @@
     }
     syncBrowserRoute('ladder',state.date);renderLimitupLadder();
   }
+  const trackingMemory=new DeadlineLRU(12,8*CACHE_MIB,10*60000);
+  let trackingRequestId=0,trackingMiniObserver=null,trackingLoading=null;
+  const trackingTableSignatures=new WeakMap();
   function openLimitupTracking(){
     syncBrowserRoute('tracking',state.date);renderLimitupTracking();
+  }
+  function trackingBadge(stock){
+    const pattern=String(stock.boardPeriod||'').match(/(\d+)天(\d+)板/),label=pattern?pattern[2]+'/'+pattern[1]:String(stock.board),title=(stock.currentBoard?'当前':'此前')+' '+stock.boardPeriod;
+    return `<span class="tracking-board${stock.currentBoard?'':' historical'}" title="${esc(title)}">${esc(label)}</span>`;
+  }
+  function trackingStockCard(stock,key,date){
+    const target=stock.signals?.[key],note=key.startsWith('return')?`前次 ${fmtDate(stock.priorLimitDate)} · ${stock.priorBoard}板 · 间隔${stock.returnGap}交易日`:key==='fresh_break'?`昨日 ${stock.boardPeriod}`:target!=null?`目标价 ${Number(target).toFixed(2)}${key==='origin'?' · 起涨日 '+fmtDate(stock.originDate):''}`:`涨停日 ${fmtDate(stock.limitDate)}`;
+    const repeat=key.startsWith('return'),badge=repeat?{...stock,board:stock.priorBoard,boardPeriod:stock.priorBoardPeriod||stock.priorBoard+'板',currentBoard:false}:stock,theme=repeat?(stock.priorTheme||stock.theme):stock.theme;
+    return `<article class="tracking-stock" style="--tracking-theme-color:${esc(ladderThemeColor(theme))}" data-tracking-theme="${esc(theme)}" data-tracking-code="${esc(stock.code)}" title="${esc(stock.code+' · '+note)}"><div class="tracking-stock-copy"><div class="tracking-name-row">${trackingBadge(badge)}<span class="tracking-stock-name${isLadderGrowthStock(stock.code)?' growth':''}">${esc(stock.name)}</span></div><span class="tracking-theme" title="${esc(theme+' · '+fmtDate(repeat?stock.priorLimitDate:stock.limitDate))}">${esc(theme)}</span></div><div class="tracking-mini" data-tracking-mini="${esc(stock.code)}" aria-label="${esc(stock.name+'最近20日K线')}" data-date="${date}"></div></article>`;
+  }
+  function renderTrackingTables(payload){
+    const host=$('#limitupTrackingContent');if(!host)return;
+    const descriptions={continuous:'当日仍连板',fresh_break:'昨日2板及以上，今日未封涨停',return5:'两次涨停之间有1–5个未涨停交易日',return10:'两次涨停之间有6–10个未涨停交易日',return20:'两次涨停之间有11–20个未涨停交易日',return30:'两次涨停之间有21–30个未涨停交易日',ma5:'当日价格区间触及MA5',ma10:'当日价格区间触及MA10',ma20:'当日价格区间触及MA20',ma30:'当日价格区间触及MA30',ma60:'当日价格区间触及MA60',origin:'连板取首板收盘价；首板取前一日收盘价'};
+    const table=(title,columns)=>{
+      const height=Math.max(0,...columns.map(c=>c.codes.length));
+      return `<section class="tracking-section"><h2>${title}</h2><div class="tracking-table-scroll"><table class="tracking-table" style="--tracking-columns:${columns.length}"><thead><tr>${columns.map(c=>`<th scope="col" title="${esc(descriptions[c.key]+'；按当时连板高度降序')}">${esc(c.title)}<small>${c.codes.length}</small></th>`).join('')}</tr></thead><tbody>${Array.from({length:Math.max(1,height)},(_,i)=>`<tr>${columns.map(c=>`<td>${c.codes[i]?trackingStockCard(payload.stocks[c.codes[i]],c.key,payload.date):i===0?'<span class="tracking-empty">—</span>':''}</td>`).join('')}</tr>`).join('')}</tbody></table></div></section>`;
+    };
+    const signature=JSON.stringify([payload.date,payload.top,payload.bottom,payload.stocks]);
+    if(trackingTableSignatures.get(host)===signature)return;trackingTableSignatures.set(host,signature);
+    host.innerHTML=table('当日或者昨日涨停类',payload.top)+table('非当日涨停类',payload.bottom);
+    const meta=$('#trackingMeta');if(meta)meta.textContent=`近30个交易日 · ${payload.screenedCount}股${payload.missingDailyCount?' · '+payload.missingDailyCount+'股缺当日行情':''}`;
+    host.dataset.date=payload.date;host.dataset.source=payload.source;host.dataset.calculationMs=payload.calculationMs;host.dataset.dataVersion=payload.dataVersion;
+    trackingMiniObserver?.disconnect();trackingMiniObserver=new IntersectionObserver(entries=>{
+      for(const entry of entries){if(!entry.isIntersecting)continue;const node=entry.target,stock=payload.stocks[node.dataset.trackingMini];node.innerHTML=topicDailyKlineSvg(stock?.daily,stock?.code||'',stock?.quoteDate||payload.date);trackingMiniObserver.unobserve(node);}
+    },{rootMargin:'80px'});
+    host.querySelectorAll('[data-tracking-mini]').forEach(node=>trackingMiniObserver.observe(node));
+  }
+  async function loadLimitupTracking({force=false}={}){
+    const date=state.date,id=++trackingRequestId,current=()=>id===trackingRequestId&&history.state?.view==='tracking'&&state.date===date;
+    const previous=trackingMemory.get(date),today=date===shanghaiDateKey();
+    if(previous){renderTrackingTables(previous.payload);if(!force&&Date.now()-previous.at<(today?10000:60000))return;}
+    let task=trackingLoading?.date===date?trackingLoading.promise:null;
+    if(!task){task=api('/api/limitup-tracking?date='+date,{cache:'no-store'});trackingLoading={date,promise:task};}
+    try{
+      const payload=await task;if(!current())return;
+      trackingMemory.set(date,{payload,at:Date.now()});renderTrackingTables(payload);$('#trackingError').hidden=true;
+    }catch(error){if(!current())return;const message=$('#trackingError');message.textContent='读取失败：'+error.message;message.hidden=false;if(!previous)$('#limitupTrackingContent').innerHTML='';}
+    finally{if(trackingLoading?.promise===task)trackingLoading=null;}
   }
   function renderLimitupTracking(){
     closeLadderTopicHover();closeLadderStockHover();closeIndexHover();closeDatePicker();
@@ -2470,15 +2513,18 @@
     ladderRequestId++;ladderResizeObserver?.disconnect();ladderView?.observer?.disconnect();ladderView?.searchAbort?.abort();
     state.dateLoadId++;state.stockLoadId++;state.indexLoadId++;
     dailyPreloadGeneration++;clearTimeout(dailyPreloadTimer);dailyPreloadController?.abort();
-    window.TradingLiveStocks?.dispose();
+    window.TradingLiveStocks?.dispose();trackingMiniObserver?.disconnect();
     state.charts.forEach(id=>{try{window.klinecharts.dispose(id);}catch{}});state.charts=[];state.chartInstances=[];
     state.topic=null;state.stock=null;state.index=null;state.indexData=null;state.indicesPage=false;
     content.classList.remove('six-grid-page');
     $('#crumbCurrent').textContent='涨停跟踪';$('#crumbCurrent').hidden=false;
     $('#crumbBack').hidden=true;$('#crumbWorkspace').hidden=true;$('#crumbSeparator').hidden=true;
-    $('#topbarActions').replaceChildren();
-    content.innerHTML='<section class="limitup-tracking-page" aria-label="涨停跟踪"><div class="page-title"><h1>涨停跟踪</h1></div><div id="limitupTrackingContent"></div></section>';
-    renderNav();syncLivePushConnection();window.scrollTo(0,0);
+    const pos=state.dates.indexOf(state.date);
+    $('#topbarActions').innerHTML=`<div class="review-date-controls topbar-date-controls"><button id="prevTrackingDate" class="date-nav-button" ${pos<=0?'disabled':''}>← 前一日</button>${datePickerTriggerMarkup('trackingDatePickerTrigger','date-nav-button')}<button id="nextTrackingDate" class="date-nav-button" ${pos>=state.dates.length-1?'disabled':''}>后一日 →</button></div><button id="refreshTracking" class="light-button" type="button">刷新</button>`;
+    const choose=step=>{const date=state.dates[state.dates.indexOf(state.date)+step];if(date){state.date=date;syncBrowserRoute('tracking',date);renderLimitupTracking();}};
+    $('#prevTrackingDate').onclick=()=>choose(-1);$('#nextTrackingDate').onclick=()=>choose(1);$('#refreshTracking').onclick=()=>loadLimitupTracking({force:true});
+    content.innerHTML='<section class="limitup-tracking-page" aria-label="涨停跟踪"><div class="tracking-heading"><h1>涨停跟踪</h1><span id="trackingMeta"></span></div><div id="trackingError" class="tracking-error" role="status" hidden></div><div id="limitupTrackingContent"><div class="loading"><span class="spinner"></span><p>正在筛选后续走势…</p></div></div></section>';
+    renderNav();syncLivePushConnection();window.scrollTo(0,0);loadLimitupTracking();
   }
   function openHome(date=history.state?.date||state.date,historyMode='push'){if(needsReviewDate(date)){syncBrowserRoute('home',date,'','',historyMode);loadDate(date);return;}syncBrowserRoute('home',date,'','',historyMode);state.topic=null;state.stock=null;state.index=null;state.indexData=null;renderHome();}
   function goBackInApp(fallbackView='home',topic=''){if(history.state?.tradingAlert&&history.state.hasAppParent){history.back();return;}if(fallbackView==='topic'&&topic)openTopic(topic);else if(fallbackView==='indices')openIndicesOverview();else openHome();}
@@ -2691,7 +2737,7 @@
     const dayNavigation=ladderMode?`<div class="calendar-trade-navigation"><button type="button" class="calendar-day-nav" data-date="${previousDate}" aria-label="前一交易日" ${previousDate?'':'disabled'}>← 前一日</button>${latestButton}<button type="button" class="calendar-day-nav" data-date="${nextDate}" aria-label="后一交易日" ${nextDate?'':'disabled'}>后一日 →</button></div>`:'';
     datePicker.innerHTML=`<div class="calendar-head"><button type="button" class="calendar-month-nav" data-month="-1" aria-label="上个月" ${monthValue<=minMonth?'disabled':''}>‹</button><strong>${year}年${month}月</strong><button type="button" class="calendar-month-nav" data-month="1" aria-label="下个月" ${monthValue>=maxMonth?'disabled':''}>›</button></div><div class="calendar-weekdays"><span>一</span><span>二</span><span>三</span><span>四</span><span>五</span><span>六</span><span>日</span></div><div class="calendar-grid">${cells.join('')}</div>${dayNavigation}${ladderMode?'':`<div class="calendar-footer">${latestButton}</div>`}`;
   }
-  async function chooseReviewDate(date){if(!state.dates.includes(date))return;const pickerId=activeDatePickerTrigger?.id;closeDatePicker();if(pickerId==='ladderSpecifiedDay'){ladderView?.setSpecifiedLegendDate?.(date);return;}if(pickerId==='ladderDatePickerTrigger'){await openLadderDate(date);return;}if(state.indicesPage){await openIndicesOverview(date);return;}if(state.topic){const topic=state.topic;syncBrowserRoute('topic',date,topic);if(!await loadDate(date))return;renderNav();if(state.review.topics.some(item=>item.name===topic))renderTopic(topic);else renderTopicNoData(topic);return;}syncBrowserRoute('home',date);await loadDate(date);}
+  async function chooseReviewDate(date){if(!state.dates.includes(date))return;const pickerId=activeDatePickerTrigger?.id;closeDatePicker();if(pickerId==='trackingDatePickerTrigger'){state.date=date;syncBrowserRoute('tracking',date);renderLimitupTracking();return;}if(pickerId==='ladderSpecifiedDay'){ladderView?.setSpecifiedLegendDate?.(date);return;}if(pickerId==='ladderDatePickerTrigger'){await openLadderDate(date);return;}if(state.indicesPage){await openIndicesOverview(date);return;}if(state.topic){const topic=state.topic;syncBrowserRoute('topic',date,topic);if(!await loadDate(date))return;renderNav();if(state.review.topics.some(item=>item.name===topic))renderTopic(topic);else renderTopicNoData(topic);return;}syncBrowserRoute('home',date);await loadDate(date);}
   function needsReviewDate(date){return date!==state.date||state.review?.date!==date||Boolean(state.review?.lightweight);}
   async function loadDate(date,{renderHomePage=true}={}){
     const requestId=++state.dateLoadId,route=location.href;
@@ -2716,14 +2762,14 @@
     const entries=[[ladderStockHover,closeLadderStockHover],[ladderTopicHover,closeLadderTopicHover],[ladderNestedThemeHover,closeLadderNestedThemeHover]];
     for(const [hover,close] of entries){if(!hover)continue;clearTimeout(hover.hideTimer);clearTimeout(hover.showTimer);if(!event.detail.open&&!hover.card.hidden&&!hover.card.matches(':hover')&&!hover.anchor?.matches(':hover'))hover.hideTimer=setTimeout(close,200);}
   });
-  async function start(){setupLiveNavigation();setupIndexHover();try{const {dates,onlineLadderDate}=await api('/api/dates');state.dates=dates.slice().sort();if(routeFromLocation().view==='ladder'&&onlineLadderDate&&!state.dates.includes(onlineLadderDate))state.dates.push(onlineLadderDate);state.dates.sort();if(!state.dates.length)throw new Error('涨停行情数据库中没有可展示的交易日数据');const incoming=routeFromLocation(),defaultDate=state.dates[state.dates.length-1],initialDate=state.dates.includes(incoming.date)?incoming.date:defaultDate,initialRoute={tradingAlert:true,view:incoming.view||'home',date:initialDate,topic:incoming.topic||'',stock:incoming.stock||'',outcome:incoming.outcome||'',index:incoming.index||'',ladderEnd:incoming.ladderEnd||''};calendarMonth=initialDate.slice(0,6);renderDatePicker();syncBrowserRoute(initialRoute.view,initialRoute.date,initialRoute.topic,initialRoute.stock,'replace',initialRoute.outcome,initialRoute.index,initialRoute.ladderEnd);if(initialRoute.view==='tracking'){state.date=initialDate;state.review={date:initialDate,topics:[],lightweight:true};$('#dataSourceLabel').textContent='已连接';renderLimitupTracking();}else if(initialRoute.view==='ladder'){
+  async function start(){setupLiveNavigation();setupIndexHover();try{const {dates,onlineLadderDate}=await api('/api/dates');state.dates=dates.slice().sort();if(['ladder','tracking'].includes(routeFromLocation().view)&&onlineLadderDate&&!state.dates.includes(onlineLadderDate))state.dates.push(onlineLadderDate);state.dates.sort();if(!state.dates.length)throw new Error('涨停行情数据库中没有可展示的交易日数据');const incoming=routeFromLocation(),defaultDate=state.dates[state.dates.length-1],initialDate=state.dates.includes(incoming.date)?incoming.date:defaultDate,initialRoute={tradingAlert:true,view:incoming.view||'home',date:initialDate,topic:incoming.topic||'',stock:incoming.stock||'',outcome:incoming.outcome||'',index:incoming.index||'',ladderEnd:incoming.ladderEnd||''};calendarMonth=initialDate.slice(0,6);renderDatePicker();syncBrowserRoute(initialRoute.view,initialRoute.date,initialRoute.topic,initialRoute.stock,'replace',initialRoute.outcome,initialRoute.index,initialRoute.ladderEnd);if(initialRoute.view==='tracking'){state.date=initialDate;state.review={date:initialDate,topics:[],lightweight:true};$('#dataSourceLabel').textContent='已连接';renderLimitupTracking();}else if(initialRoute.view==='ladder'){
       const day=state.dates.includes(initialRoute.ladderEnd)?initialRoute.ladderEnd:initialDate;
       state.date=day;state.review={date:day,topics:[],lightweight:true};renderNav();
       syncBrowserRoute('ladder',day,'','','replace','','',day);
       document.documentElement.dataset.navigationReview='loading';
       const pending=getReviewData(day);pending.catch(()=>{});
       await renderLimitupLadder();if(ladderView)updateLadderReview(day,ladderView,pending);
-    }else if(await loadDate(initialDate,{renderHomePage:initialRoute.view==='home'})&&initialRoute.view!=='home')await restoreBrowserRoute(initialRoute);window.addEventListener('popstate',event=>restoreBrowserRoute(event.state?.tradingAlert?event.state:routeFromLocation()));}catch(e){content.innerHTML=`<div class="empty-state">${esc(e.message)}</div>`}document.body.append(datePicker);document.addEventListener('click',event=>{const trigger=event.target.closest('[data-date-picker-trigger]');if(trigger){if(activeDatePickerTrigger===trigger&&!datePicker.hidden)closeDatePicker();else openDatePicker(trigger);}});datePicker.onclick=async event=>{const button=event.target.closest('button');if(!button)return;if(button.dataset.month){const y=Number(calendarMonth.slice(0,4)),m=Number(calendarMonth.slice(4,6))+Number(button.dataset.month),d=new Date(Date.UTC(y,m-1,1));calendarMonth=`${d.getUTCFullYear()}${String(d.getUTCMonth()+1).padStart(2,'0')}`;renderDatePicker();return;}if(button.dataset.latest){const topicMode=activeDatePickerTrigger?.id==='topicDatePickerTrigger',dates=topicMode?Array.from(state.topicDates[state.topic]||[]).sort():state.dates,target=dates[dates.length-1];if(target)await chooseReviewDate(target);return;}if(button.dataset.date)await chooseReviewDate(button.dataset.date);};document.addEventListener('mousedown',event=>{if(!event.target.closest('[data-date-picker-trigger]')&&!datePicker.contains(event.target))closeDatePicker();});document.addEventListener('keydown',event=>{if(event.key==='Escape'&&!datePicker.hidden)closeDatePicker();});$('#refreshBtn').onclick=async()=>{if(history.state?.view==='tracking'){renderLimitupTracking();return;}if(isLivePage()){await refreshLivePage();return;}const wasLadder=history.state?.view==='ladder',wasIndices=state.indicesPage;if(!await loadDate(state.date))return;if(wasLadder)renderLimitupLadder();else if(wasIndices)renderIndicesOverview();};$('.collapse').onclick=()=>{const collapsed=!appShell.classList.contains('nav-collapsed');setNavigationCollapsed(collapsed);if(window.innerWidth<=700)$('.sidebar').classList.toggle('open',!collapsed);};$('#navReopen').onclick=()=>{setNavigationCollapsed(false);if(window.innerWidth<=700)$('.sidebar').classList.add('open');};setupSettings();setupSelection();}
+    }else if(await loadDate(initialDate,{renderHomePage:initialRoute.view==='home'})&&initialRoute.view!=='home')await restoreBrowserRoute(initialRoute);window.addEventListener('popstate',event=>restoreBrowserRoute(event.state?.tradingAlert?event.state:routeFromLocation()));}catch(e){content.innerHTML=`<div class="empty-state">${esc(e.message)}</div>`}document.body.append(datePicker);document.addEventListener('click',event=>{const trigger=event.target.closest('[data-date-picker-trigger]');if(trigger){if(activeDatePickerTrigger===trigger&&!datePicker.hidden)closeDatePicker();else openDatePicker(trigger);}});datePicker.onclick=async event=>{const button=event.target.closest('button');if(!button)return;if(button.dataset.month){const y=Number(calendarMonth.slice(0,4)),m=Number(calendarMonth.slice(4,6))+Number(button.dataset.month),d=new Date(Date.UTC(y,m-1,1));calendarMonth=`${d.getUTCFullYear()}${String(d.getUTCMonth()+1).padStart(2,'0')}`;renderDatePicker();return;}if(button.dataset.latest){const topicMode=activeDatePickerTrigger?.id==='topicDatePickerTrigger',dates=topicMode?Array.from(state.topicDates[state.topic]||[]).sort():state.dates,target=dates[dates.length-1];if(target)await chooseReviewDate(target);return;}if(button.dataset.date)await chooseReviewDate(button.dataset.date);};document.addEventListener('mousedown',event=>{if(!event.target.closest('[data-date-picker-trigger]')&&!datePicker.contains(event.target))closeDatePicker();});document.addEventListener('keydown',event=>{if(event.key==='Escape'&&!datePicker.hidden)closeDatePicker();});$('#refreshBtn').onclick=async()=>{if(history.state?.view==='tracking'){await loadLimitupTracking({force:true});return;}if(isLivePage()){await refreshLivePage();return;}const wasLadder=history.state?.view==='ladder',wasIndices=state.indicesPage;if(!await loadDate(state.date))return;if(wasLadder)renderLimitupLadder();else if(wasIndices)renderIndicesOverview();};$('.collapse').onclick=()=>{const collapsed=!appShell.classList.contains('nav-collapsed');setNavigationCollapsed(collapsed);if(window.innerWidth<=700)$('.sidebar').classList.toggle('open',!collapsed);};$('#navReopen').onclick=()=>{setNavigationCollapsed(false);if(window.innerWidth<=700)$('.sidebar').classList.add('open');};setupSettings();setupSelection();}
   function fitUiScale(){const browserZoom=(window.devicePixelRatio||initialDevicePixelRatio)/initialDevicePixelRatio,layoutWidth=window.innerWidth*browserZoom,automatic=state.chartLayout==='grid'?1:Math.max(1,Math.min(1.4,layoutWidth/1440)),multiplier=state.uiScalePreference==='auto'?1:Number(state.uiScalePreference)||1,scale=Math.max(1,Math.min(1.8,automatic*multiplier));document.documentElement.style.zoom=String(scale);}
   window.addEventListener('resize',fitUiScale,{passive:true});fitUiScale();
   start();
