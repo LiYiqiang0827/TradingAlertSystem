@@ -403,7 +403,7 @@
       while(livePushedQuotes.size>16384)livePushedQuotes.delete(livePushedQuotes.keys().next().value);
     }
     for(const quote of event.indices||[]){
-      for(const name of document.querySelectorAll(`#ladderTopicHover .vl-date-index [data-index-preview="${quote.code}"][data-index-date="${date}"]`)){
+      for(const name of document.querySelectorAll(`[data-preview-kind=topic] .vl-date-index [data-index-preview="${quote.code}"][data-index-date="${date}"]`)){
         const box=name.parentElement,pct=Number(quote.pct),span=box.querySelector('span'),price=box.querySelector('b'),amount=box.querySelector('small');
         if(span&&quote.pct!=null&&Number.isFinite(pct)){span.textContent=(pct>0?'+':'')+pct.toFixed(2)+'%';span.classList.toggle('pct-up',pct>0);span.classList.toggle('pct-down',pct<0);}
         if(price&&quote.price!=null)price.textContent=num(quote.price);
@@ -458,8 +458,8 @@
       if(ladderView&&history.state?.view==='ladder'&&(resync||['snapshot','limitperformance','zt','break'].some(kind=>kinds.has(kind))))jobs.push(refreshLiveLadder(pending.ladderStatus,resync));
       if(history.state?.view==='tracking'&&state.date===shanghaiDateKey()&&Date.now()-(trackingMemory.peek(state.date)?.at||0)>=10000&&(resync||['snapshot','limitperformance','zt','break'].some(kind=>kinds.has(kind))))jobs.push(loadLimitupTracking({force:true}));
       if(isLivePage()&&(resync||['snapshot_index','zt','break'].some(kind=>kinds.has(kind))))jobs.push(refreshLivePage());
-      if(resync||kinds.has('snapshot_index'))jobs.push(refreshPushedHover(indexHover));
-      if(resync||codes.has(ladderStockHover?.card.dataset.stock)||kinds.has('minute'))jobs.push(refreshPushedHover(ladderStockHover));
+      for(const hover of previewWindows)if(hover.kind==='index'&&(resync||kinds.has('snapshot_index')))jobs.push(refreshPushedHover(hover));
+      for(const hover of previewWindows)if(hover.kind==='stock'&&(resync||codes.has(hover.card.dataset.stock)||kinds.has('minute')))jobs.push(refreshPushedHover(hover));
       await Promise.allSettled(jobs);
       // Refresh seal amounts only for visible stock rows, after the source cache is invalidated.
       if((resync||['limitperformance','zt','break'].some(kind=>kinds.has(kind)))&&document.querySelector('#ladderLegend .vl-legend-stock-row'))ladderView?.refreshLegendStocks?.();
@@ -485,7 +485,7 @@
   }
 
   function routeUrl(route){const params=new URLSearchParams();params.set('date',route.date);if(route.view&&route.view!=='home')params.set('view',route.view);if(route.topic)params.set('topic',route.topic);if(route.stock)params.set('stock',route.stock);if(route.index)params.set('index',route.index);if(route.outcome)params.set('outcome',route.outcome);if(route.view==='ladder'&&route.ladderEnd)params.set('ladderEnd',route.ladderEnd);return `${location.pathname}?${params.toString()}`;}
-  function syncBrowserRoute(view='home',date=state.date,topic='',stock='',mode='push',outcome='',index='',ladderEnd=''){closeLadderStockHover(true);closeIndexHover(true);const previous=history.state,parent=mode==='push'&&previous?.tradingAlert,ladderReturn=['home','topic','stock','index'].includes(view)?(previous?.view==='ladder'?captureLadderReturn():previous?.ladderReturn||null):null;const route={tradingAlert:true,view,date,topic,stock,index,outcome,ladderEnd,ladderReturn,indexCutoff:view==='index'&&(['ladder','indices'].includes(previous?.view)||Boolean(previous?.indexCutoff)),hasAppParent:Boolean(parent)};const url=routeUrl(route);if(mode==='push'&&history.state?.tradingAlert&&routeUrl(history.state)===url)return route;history[`${mode}State`](route,'',url);return route;}
+  function syncBrowserRoute(view='home',date=state.date,topic='',stock='',mode='push',outcome='',index='',ladderEnd=''){closeAllPinnedPreviews();closeLadderStockHover(true);closeIndexHover(true);const previous=history.state,parent=mode==='push'&&previous?.tradingAlert,ladderReturn=['home','topic','stock','index'].includes(view)?(previous?.view==='ladder'?captureLadderReturn():previous?.ladderReturn||null):null;const route={tradingAlert:true,view,date,topic,stock,index,outcome,ladderEnd,ladderReturn,indexCutoff:view==='index'&&(['ladder','indices'].includes(previous?.view)||Boolean(previous?.indexCutoff)),hasAppParent:Boolean(parent)};const url=routeUrl(route);if(mode==='push'&&history.state?.tradingAlert&&routeUrl(history.state)===url)return route;history[`${mode}State`](route,'',url);return route;}
   function routeFromLocation(){if(history.state?.tradingAlert)return history.state;const params=new URLSearchParams(location.search),date=params.get('date')||'',view=params.get('view')||'home';return {tradingAlert:true,date,view,topic:params.get('topic')||'',stock:params.get('stock')||'',index:params.get('index')||'',outcome:params.get('outcome')||'',ladderEnd:params.get('ladderEnd')||params.get('ladderStart')||''};}
   function captureLadderReturn(){
     const view=ladderView,chart=$('#ladderChart');if(!chart&&view?.returnSnapshot)return view.returnSnapshot;
@@ -1075,25 +1075,30 @@
       while(ladderDateDetailCache.size>32)ladderDateDetailCache.delete(ladderDateDetailCache.keys().next().value);return payload;
     });ladderDateDetailRequests.set(key,task);return task.finally(()=>{if(ladderDateDetailRequests.get(key)===task)ladderDateDetailRequests.delete(key);});
   }
-  function closeLadderTopicHover(){if(Watchlists.isOpen)return;
-    closeLadderNestedThemeHover();closeLadderStockHover();closeIndexHover();
-    const hover=ladderTopicHover;if(!hover)return;
-    clearTimeout(hover.showTimer);clearTimeout(hover.hideTimer);hover.requestId++;hover.anchor=null;hover.card.hidden=true;hover.card.onclick=null;flushPendingLiveLadder();
+  function closeLadderTopicHover(force=false,target=null){if(Watchlists.isOpen&&force!==true)return;
+    if((target||ladderTopicHover)?.pinned&&force!==true)return;
+    const hover=target||ladderTopicHover;if(!hover)return;
+    for(const child of [ladderNestedThemeHover,ladderStockHover,indexHover])if(child?.anchor&&hover.card.contains(child.anchor))child.close();
+    hover.pinned=false;
+    clearTimeout(hover.showTimer);clearTimeout(hover.hideTimer);hover.requestId++;hover.anchor=null;hover.card.hidden=true;hover.card.onclick=null;destroyRetiredPreview(hover);flushPendingLiveLadder();
   }
   function ensureLadderTopicHover(){
     if(ladderTopicHover)return ladderTopicHover;
     const card=document.createElement('section');card.id='ladderTopicHover';card.className='vl-topic-hover';card.hidden=true;card.setAttribute('role','dialog');card.setAttribute('aria-label','题材当日涨停列表');card.setAttribute('tabindex','-1');document.body.append(card);
     const hover=ladderTopicHover={card,requestId:0,showTimer:0,hideTimer:0,anchor:null};
+    hover.events=new AbortController();
+    installTopicPreviewControls(hover,closeLadderTopicHover);
     card.addEventListener('pointerenter',()=>clearTimeout(hover.hideTimer));
-    card.addEventListener('pointerleave',event=>{if(ladderStockHover?.card.contains(event.relatedTarget)||indexHover?.card.contains(event.relatedTarget)||ladderNestedThemeHover?.card.contains(event.relatedTarget))return;hover.hideTimer=setTimeout(closeLadderTopicHover,140);});
+    card.addEventListener('pointerleave',event=>{if(ladderStockHover?.card.contains(event.relatedTarget)||indexHover?.card.contains(event.relatedTarget)||ladderNestedThemeHover?.card.contains(event.relatedTarget))return;hover.hideTimer=setTimeout(()=>hover.close(),140);});
     card.addEventListener('focusin',()=>clearTimeout(hover.hideTimer));
-    card.addEventListener('focusout',event=>{if(!card.contains(event.relatedTarget)&&!ladderNestedThemeHover?.card.contains(event.relatedTarget)&&!ladderStockHover?.card.contains(event.relatedTarget)&&!indexHover?.card.contains(event.relatedTarget))hover.hideTimer=setTimeout(closeLadderTopicHover,140);});
-    document.addEventListener('keydown',event=>{if(event.key==='Escape'&&!card.hidden){event.preventDefault();event.stopPropagation();closeLadderTopicHover();}},true);
-    window.addEventListener('resize',closeLadderTopicHover);
-    document.addEventListener('scroll',event=>{if(!card.hidden&&!card.contains(event.target)&&!ladderStockHover?.card.contains(event.target)&&!ladderNestedThemeHover?.card.contains(event.target)&&!indexHover?.card.contains(event.target))closeLadderTopicHover();},true);
+    card.addEventListener('focusout',event=>{if(!card.contains(event.relatedTarget)&&!ladderNestedThemeHover?.card.contains(event.relatedTarget)&&!ladderStockHover?.card.contains(event.relatedTarget)&&!indexHover?.card.contains(event.relatedTarget))hover.hideTimer=setTimeout(()=>hover.close(),140);});
+    addPreviewDocumentListener(hover,'keydown',event=>{if(event.key==='Escape'&&!card.hidden){event.preventDefault();event.stopPropagation();hover.close();}},true);
+    window.addEventListener('resize',()=>{if(hover.pinned)clampPinnedPreview(card);else hover.close();},{signal:hover.events.signal});
+    addPreviewDocumentListener(hover,'scroll',event=>{if(!card.hidden&&!card.contains(event.target)&&!ladderStockHover?.card.contains(event.target)&&!ladderNestedThemeHover?.card.contains(event.target)&&!indexHover?.card.contains(event.target))hover.close();},true);
     return hover;
   }
   function positionLadderTopicHover(anchor,card){
+    if(card.classList.contains("is-pinned")&&card.style.left){clampPinnedPreview(card);return;}
     const zoom=parseFloat(getComputedStyle(document.documentElement).zoom)||1,margin=10;
     card.style.width=Math.min(card.dataset.hoverMode==='range'?Math.min(1080,32+76*Number(card.dataset.rangeDays||1)):card.dataset.hoverMode==='date'?720:620,(window.innerWidth-margin*2)/zoom)+'px';card.style.maxHeight=Math.min(600,(window.innerHeight-margin*2)/zoom)+'px';
     const box=anchor.getBoundingClientRect(),size=card.getBoundingClientRect();let x=box.right+12;
@@ -1231,7 +1236,7 @@
   let ladderShowLatest=localStorage.getItem('ladderShowLatest')==='true';
   let trackingShowLatest=localStorage.getItem('trackingShowLatest')!=='false';
   const ladderStockHoverRequests=new Map();
-  const ladderStockPreviewSelector='#ladderLegend .vl-legend-stock-name[data-vl-stock-preview],#ladderChart [data-vl-stock-link],#ladderChart [data-vl-unpromoted-link],#ladderChart [data-vl-broken-link],#ladderTopicHover [data-vl-stock-preview],#ladderNestedThemeHover [data-vl-stock-preview],#limitupTrackingContent [data-tracking-stock-preview]';
+  const ladderStockPreviewSelector='#ladderLegend .vl-legend-stock-name[data-vl-stock-preview],#ladderChart [data-vl-stock-link],#ladderChart [data-vl-unpromoted-link],#ladderChart [data-vl-broken-link],[data-preview-kind=topic] [data-vl-stock-preview],[data-preview-kind=nested] [data-vl-stock-preview],#limitupTrackingContent [data-tracking-stock-preview]';
   function flushPendingLiveLadder(){
     const view=ladderView;if(!view?.live||!view.pendingPaint)return;
     requestAnimationFrame(()=>{if(ladderView===view&&view.pendingPaint&&!view.dragging&&history.state?.view==='ladder'&&(!ladderStockHover||ladderStockHover.card.hidden||ladderStockHover.pinned)&&(!ladderTopicHover||ladderTopicHover.card.hidden)&&(!indexHover||indexHover.card.hidden||indexHover.pinned))rebuildVerticalLadder(view);});
@@ -1268,7 +1273,7 @@
     else{delete hover.card.dataset.previousSnapshot;delete hover.card.dataset.refreshError;hover.card.title='';}
   }
   function mountHoverCharts(hover,payload,date,identity,info,isIndex=false){
-    const {daily,days,specs}=hoverChartSeries(payload,date),key=hoverPoolKey(isIndex?'index':'stock',identity,date,hover.showLatest??ladderShowLatest)+(hover.poolSuffix||''),warm=takeHoverCharts(key,payload),prefix=(isIndex?'index-preview-':'ladder-stock-preview-')+hover.requestId+'-';
+    const {daily,days,specs}=hoverChartSeries(payload,date),key=hoverPoolKey(isIndex?'index':'stock',identity,date,hover.showLatest??ladderShowLatest)+(hover.poolSuffix||''),warm=takeHoverCharts(key,payload),prefix=(isIndex?'index-preview-':'ladder-stock-preview-')+hover.uid+'-'+hover.requestId+'-';
     hover.cacheKey=key;hover.identity=identity;hover.isIndex=isIndex;hover.card.innerHTML='<div class="vl-stock-preview-info">'+info+'</div>';hover.card.dataset.chartReused=String(Boolean(warm));
     if(warm){hover.card.append(warm.node);hover.chartIds=warm.ids;hover.charts=warm.charts;hover.entries=warm.entries;hover.lastSignature=warm.signature;hover.lastPayload=warm.payload;}
     else{
@@ -1307,6 +1312,32 @@
     delete hover.card.dataset.refreshError;hover.card.title='';hover.card.dataset.updatedAt=payload.updatedAt||new Date().toISOString();hover.card.dataset.refreshCount=String(Number(hover.card.dataset.refreshCount||0)+1);
     return series;
   }
+  const previewWindows=new Set();let previewSequence=0,previewZ=200;
+  function addPreviewDocumentListener(hover,type,listener,capture=false){document.addEventListener(type,listener,{capture,signal:hover.events.signal});}
+  function registerPreview(hover,kind,close){
+    hover.uid=++previewSequence;hover.kind=kind;hover.close=force=>close(force,hover);previewWindows.add(hover);
+    hover.card.dataset.previewKind=kind;
+    hover.card.addEventListener('pointerdown',()=>{hover.card.style.zIndex=String(++previewZ);});
+  }
+  function retirePreview(hover){
+    hover.events?.abort();hover.card.id='fixed-preview-'+hover.uid;
+    if(hover===ladderStockHover){ladderStockHover=null;ensureLadderStockHover();}
+    else if(hover===indexHover){indexHover=null;setupIndexHover();}
+    else if(hover===ladderTopicHover)ladderTopicHover=null;
+    else if(hover===ladderNestedThemeHover)ladderNestedThemeHover=null;
+  }
+  function destroyRetiredPreview(hover){
+    if([ladderStockHover,indexHover,ladderTopicHover,ladderNestedThemeHover].includes(hover))return;
+    hover.controlsObserver?.disconnect();hover.events?.abort();previewWindows.delete(hover);hover.card.remove();
+  }
+  function closeAllPinnedPreviews(){for(const hover of [...previewWindows])if(hover.pinned||hover.card.id.startsWith('fixed-preview-'))hover.close(true);}
+  document.addEventListener('keydown',event=>{if(event.key!=='Escape')return;const visible=[...previewWindows].filter(h=>!h.card.hidden).sort((a,b)=>Number(b.card.style.zIndex||0)-Number(a.card.style.zIndex||0));if(visible.length){event.preventDefault();event.stopImmediatePropagation();visible[0].close(true);}},true);
+  function installTopicPreviewControls(hover,close){
+    registerPreview(hover,hover.card.classList.contains('vl-nested-theme-hover')?'nested':'topic',close);
+    installPreviewControls(hover,hover.close);
+    const decorate=()=>{const head=hover.card.querySelector('.vl-hover-head');if(head&&!head.querySelector('[data-preview-pin]'))head.insertAdjacentHTML('beforeend',previewControls(hover));};
+    hover.controlsObserver=new MutationObserver(decorate);hover.controlsObserver.observe(hover.card,{childList:true,subtree:true});
+  }
   function previewControls(hover){
     const pinned=Boolean(hover?.pinned);
     return `<button type="button" class="preview-pin" data-preview-pin aria-pressed="${pinned}" aria-label="${pinned?'取消固定悬浮窗':'固定悬浮窗'}" title="${pinned?'取消固定':'固定悬浮窗'}"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M6 2h8l-1 5 2 3v1h-4v6l-1 2-1-2v-6H5v-1l2-3z"/></svg></button><button type="button" class="preview-close" data-preview-close aria-label="关闭悬浮窗" title="关闭">×</button>`;
@@ -1317,11 +1348,11 @@
       const pin=event.target.closest('[data-preview-pin]'),dismiss=event.target.closest('[data-preview-close]');
       if(dismiss){event.preventDefault();event.stopPropagation();close(true);return;}
       if(!pin)return;event.preventDefault();event.stopPropagation();clearTimeout(hover.hideTimer);clearTimeout(hover.showTimer);
-      hover.pinned=!hover.pinned;card.classList.toggle('is-pinned',hover.pinned);if(hover.pinned){clampPinnedPreview(card);flushPendingLiveLadder();flushPendingTrackingHover();}pin.setAttribute('aria-pressed',String(hover.pinned));
+      hover.pinned=!hover.pinned;if(hover.pinned)retirePreview(hover);card.style.zIndex=String(++previewZ);card.classList.toggle('is-pinned',hover.pinned);if(hover.pinned){clampPinnedPreview(card);flushPendingLiveLadder();flushPendingTrackingHover();}pin.setAttribute('aria-pressed',String(hover.pinned));
       pin.setAttribute('aria-label',hover.pinned?'取消固定悬浮窗':'固定悬浮窗');pin.title=hover.pinned?'取消固定':'固定悬浮窗';
     });
     card.addEventListener('pointerdown',event=>{
-      if(!hover.pinned||event.button!==0||!event.target.closest('.vl-stock-preview-head')||event.target.closest('button,a,input,select,textarea'))return;
+      if(!hover.pinned||event.button!==0||!event.target.closest('.vl-stock-preview-head,.vl-hover-head')||event.target.closest('button,a,input,select,textarea'))return;
       const box=card.getBoundingClientRect();hover.drag={id:event.pointerId,x:event.clientX,y:event.clientY,left:box.left,top:box.top};
       card.setPointerCapture(event.pointerId);card.classList.add('is-dragging');event.preventDefault();
     });
@@ -1335,9 +1366,9 @@
     const end=event=>{if(hover.drag?.id!==event.pointerId)return;hover.drag=null;card.classList.remove('is-dragging');if(card.hasPointerCapture(event.pointerId))card.releasePointerCapture(event.pointerId);};
     card.addEventListener('pointerup',end);card.addEventListener('pointercancel',end);
   }
-  function closeLadderStockHover(force=false){if(Watchlists.isOpen&&force!==true)return;
-    const hover=ladderStockHover;if(!hover||(hover.pinned&&force!==true))return;hover.pinned=false;hover.drag=null;hover.card.classList.remove('is-pinned','is-dragging');clearTimeout(hover.showTimer);clearTimeout(hover.hideTimer);clearTimeout(hover.liveTimer);hover.liveRefresh=null;hover.liveRefreshPending=false;hover.requestId++;hover.anchor=null;hover.resizeObserver?.disconnect();hover.resizeObserver=null;
-    parkHoverCharts(hover);hover.card.hidden=true;hover.entries=null;hover.stock=null;hover.chartIds=[];hover.charts=[];hover.lastPayload=null;hover.lastSignature='';hover.cacheKey='';hover.card.replaceChildren();flushPendingLiveLadder();flushPendingTrackingHover();
+  function closeLadderStockHover(force=false,target=null){if(Watchlists.isOpen&&force!==true)return;
+    const hover=target||ladderStockHover;if(!hover||(hover.pinned&&force!==true))return;hover.pinned=false;hover.drag=null;hover.card.classList.remove('is-pinned','is-dragging');clearTimeout(hover.showTimer);clearTimeout(hover.hideTimer);clearTimeout(hover.liveTimer);hover.liveRefresh=null;hover.liveRefreshPending=false;hover.requestId++;hover.anchor=null;hover.resizeObserver?.disconnect();hover.resizeObserver=null;
+    parkHoverCharts(hover);hover.card.hidden=true;hover.entries=null;hover.stock=null;hover.chartIds=[];hover.charts=[];hover.lastPayload=null;hover.lastSignature='';hover.cacheKey='';hover.card.replaceChildren();destroyRetiredPreview(hover);flushPendingLiveLadder();flushPendingTrackingHover();
   }
   function clampPinnedPreview(card){
     if(!card.classList.contains('is-pinned'))return;
@@ -1411,13 +1442,13 @@
     if(stock.board_shape!=='one_word'&&stock.board_strength==='strong')tags.push(['强板','strong']);else if(stock.board_shape!=='one_word'&&stock.board_strength==='weak')tags.push(['弱板','weak']);
     return tags.map(([label,kind])=>`<span class="vl-stock-preview-trait ${kind}">${label}</span>`).join('');
   }
-  function ladderStockPreviewInfo(stock,payload){
+  function ladderStockPreviewInfo(stock,payload,hover=ladderStockHover){
     const data=payload?.previewFacts,price=value=>value==null||!Number.isFinite(Number(value))?'—':Number(value).toFixed(2),percent=(value,signed=false)=>value==null||!Number.isFinite(Number(value))?'—':(signed&&Number(value)>0?'+':'')+Number(value).toFixed(2)+'%',tone=value=>value==null?'':Number(value)>0?'pct-up':Number(value)<0?'pct-down':'',label=ladderStockPreviewBoardLabel(stock);
     const facts=[['收盘价格',price(data?.close),tone(data?.pct)],['涨幅',percent(data?.pct,true),tone(data?.pct)],['振幅',percent(data?.amplitude)],['开盘涨幅',percent(data?.openPct,true),tone(data?.openPct)],['涨停时间',data?.limitTime||stock.time||'—'],['成交额',compactYuan(data?.amount)],['流通市值'+(data?.estimates?.floatMarketCap?'（估）':''),compactMarketCap(data?.floatMarketCap),'',data?.estimates?.floatMarketCap?'按 '+fmtDate(data.estimates.floatMarketCap.basisDate)+' 流通股本 × 今日价格估算':''],['自由换手率'+(data?.estimates?.freeFloatTurnover?'（估）':''),percent(data?.freeFloatTurnover),'',data?.estimates?.freeFloatTurnover?'按今日累计成交股数 ÷ '+fmtDate(data.estimates.freeFloatTurnover.basisDate)+' 自由流通股数估算':'']];
     if(data?.isSealed)facts.push(['实时封板资金',compactYuan(data.sealAmount),'pct-up',(data.sealUpdatedAt?'行情时间 '+new Date(data.sealUpdatedAt).toLocaleString('zh-CN',{timeZone:'Asia/Shanghai',hour12:false})+' · ':'')+(data.sealSource==='kpl_zt'?'开盘啦涨停池':'开盘啦 performance')]);
     if(data?.breakTime)facts.push(['破板时间',data.breakTime]);
     if(data?.breakCount!=null)facts.push(['破板次数',String(data.breakCount)]);
-    return `<header class="vl-stock-preview-head">${marketCapBadge(data?.totalMarketCap)}<strong${isLadderGrowthStock(stock.code)?' class="vl-hover-growth-name"':''}>${esc(stock.name)}</strong>${Watchlists.button(stock)}<span>${esc(stock.code)}</span><span>${esc(stock.theme)}</span><span>${esc(label)}</span>${ladderStockPreviewTraits(stock)}<time>${esc(fmtDate(stock.date))}</time>${previewControls(ladderStockHover)}</header><div class="vl-stock-preview-facts">${facts.map(([name,value,tone,title])=>`<div${title?` title="${esc(title)}"`:''}><span>${name}</span><b${tone?` class="${tone}"`:''}>${esc(value)}</b></div>`).join('')}</div>`;
+    return `<header class="vl-stock-preview-head">${marketCapBadge(data?.totalMarketCap)}<strong${isLadderGrowthStock(stock.code)?' class="vl-hover-growth-name"':''}>${esc(stock.name)}</strong>${Watchlists.button(stock)}<span>${esc(stock.code)}</span><span>${esc(stock.theme)}</span><span>${esc(label)}</span>${ladderStockPreviewTraits(stock)}<time>${esc(fmtDate(stock.date))}</time>${previewControls(hover)}</header><div class="vl-stock-preview-facts">${facts.map(([name,value,tone,title])=>`<div${title?` title="${esc(title)}"`:''}><span>${name}</span><b${tone?` class="${tone}"`:''}>${esc(value)}</b></div>`).join('')}</div>`;
   }
   function ladderStockDailyQuote(stock,payload,bars){
     const bar=bars.find(bar=>chartDayKey(bar)===stock.date)||bars.at(-1),day=bar?chartDayKey(bar):stock.date,data=day===stock.date?payload.previewFacts:null,price=value=>value==null||!Number.isFinite(Number(value))?'—':Number(value).toFixed(2),percent=value=>value==null||!Number.isFinite(Number(value))?'—':(Number(value)>0?'+':'')+Number(value).toFixed(2)+'%',volume=value=>value==null||!Number.isFinite(Number(value))?'—':Number(value)>=1e4?(Number(value)/1e4).toFixed(1)+'万':Math.round(Number(value)).toString();
@@ -1439,12 +1470,15 @@
     return String(month.getUTCFullYear())+String(month.getUTCMonth()+1).padStart(2,'0')+String(Math.min(Number(date.slice(6,8)),last)).padStart(2,'0');
   }
   function resolveStockHoverContext(anchor){
+    const owner=[...previewWindows].find(hover=>hover.stockContext&&hover.card.contains(anchor));
+    if(owner)return owner.stockContext;
     return anchor.closest('#limitupTrackingContent')?trackingStockHoverContext:ladderStockHoverContext;
   }
-  function stockHoverContextCurrent(context,anchor){
-    if(!context||(!anchor.isConnected&&!ladderStockHover?.pinned))return false;
-    if(context.mode==='tracking')return history.state?.view==='tracking'&&(trackingStockHoverContext===context||ladderStockHover?.pinned)&&state.date===context.date;
-    return history.state?.view==='ladder'&&ladderView===context.view&&(ladderStockHover?.pinned||(!context.view.dragging&&context.view.data===context.fullData));
+  function stockHoverContextCurrent(context,anchor,hover=ladderStockHover){
+    if(!context||(!anchor.isConnected&&!hover?.pinned))return false;
+    if(context.owner?.pinned&&history.state?.view==='ladder'&&ladderView===context.view)return true;
+    if(context.mode==='tracking')return history.state?.view==='tracking'&&(trackingStockHoverContext===context||hover?.pinned)&&state.date===context.date;
+    return history.state?.view==='ladder'&&ladderView===context.view&&(hover?.pinned||(!context.view.dragging&&context.view.data===context.fullData));
   }
   function flushPendingTrackingHover(){
     if(!trackingPendingPayload)return;
@@ -1456,50 +1490,50 @@
     });
   }
   async function showLadderStockHover(anchor){
-    if(Watchlists.isOpen||ladderStockHover?.pinned)return;
+    if(Watchlists.isOpen)return;
     const context=resolveStockHoverContext(anchor);if(!stockHoverContextCurrent(context,anchor))return;
     const showLatest=context.mode==='tracking'?trackingShowLatest:ladderShowLatest;
     const stock=ladderStockHoverRecord(context,anchor);
-    if(!stock)return;const fromRoster=Boolean(anchor.closest('#ladderTopicHover,#ladderNestedThemeHover'));
+    if(!stock)return;const fromRoster=Boolean(anchor.closest('[data-preview-kind=topic],[data-preview-kind=nested]'));
     if(!fromRoster)closeLadderTopicHover();else{if(ladderTopicHover)clearTimeout(ladderTopicHover.hideTimer);if(ladderNestedThemeHover)clearTimeout(ladderNestedThemeHover.hideTimer);}
     const hover=ensureLadderStockHover();closeLadderStockHover();hover.anchor=anchor;hover.showLatest=showLatest;hover.minimumDailyDate=context.mode==='tracking'?trackingDailyStart(stock):'';hover.poolSuffix=hover.minimumDailyDate?':tracking:'+hover.minimumDailyDate:'';const requestId=++hover.requestId,loadStarted=performance.now();
-    hover.card.setAttribute('aria-label',stock.name+' · 基本信息与行情');hover.card.dataset.stock=stock.code;hover.card.dataset.date=stock.date;for(const field of ['cacheSource','loadMs','renderMs','chartReused','dailyReadyMs','dailyPreloaded'])delete hover.card.dataset[field];hover.card.innerHTML=ladderStockPreviewInfo(stock,null)+'<div class="vl-stock-preview-loading" aria-live="polite">正在读取行情…</div>';hover.card.hidden=false;positionLadderStockHover(anchor,hover.card);
+    hover.card.setAttribute('aria-label',stock.name+' · 基本信息与行情');hover.card.dataset.stock=stock.code;hover.card.dataset.date=stock.date;for(const field of ['cacheSource','loadMs','renderMs','chartReused','dailyReadyMs','dailyPreloaded'])delete hover.card.dataset[field];hover.card.innerHTML=ladderStockPreviewInfo(stock,null,hover)+'<div class="vl-stock-preview-loading" aria-live="polite">正在读取行情…</div>';hover.card.hidden=false;hover.card.style.zIndex=String(++previewZ);positionLadderStockHover(anchor,hover.card);
     let complete=false;
     // Show already-preloaded daily bars while native minute requests finish.
     if(!showLatest&&!hoverChartPool.has(hoverPoolKey('stock',stock.code,stock.date,showLatest)+hover.poolSuffix))readDailyPreview(stock.code,stock.date).then(preview=>{
-      if(!preview||complete||requestId!==hover.requestId||hover.anchor!==anchor||!stockHoverContextCurrent(context,anchor))return;
-      hover.stock=stock;mountHoverCharts(hover,preview,stock.date,stock.code,ladderStockPreviewInfo(stock,null));
+      if(!preview||complete||requestId!==hover.requestId||hover.anchor!==anchor||!stockHoverContextCurrent(context,anchor,hover))return;
+      hover.stock=stock;mountHoverCharts(hover,preview,stock.date,stock.code,ladderStockPreviewInfo(stock,null,hover));
       hover.card.dataset.dailyReadyMs=(performance.now()-loadStarted).toFixed(1);hover.card.dataset.dailyPreloaded='true';
       for(const mount of hover.card.querySelectorAll('[data-preview-period]'))if(mount.dataset.previewPeriod!=='daily')mount.innerHTML='<div class="empty-state">正在读取分钟行情…</div>';
     }).catch(()=>{});
     try{
-      const [chartData,facts]=await Promise.all([getLadderStockChartData(stock,{showLatest,fifteenFutureDays:context.mode==='tracking'?0:15}),(stock.date===shanghaiDateKey()?Promise.resolve(null):getLadderStockFacts(stock,context.dataVersion||context.view?.dataVersion)).catch(error=>{console.warn('个股基本信息读取失败',error);return null;})]),payload=chartData.isLive||chartData.previewFacts===facts||marketCacheSources.get(chartData)?.notice&&chartData.previewFacts?chartData:{...chartData,previewFacts:facts,previewFactsVersion:facts?.stockFactsVersion||stockMeta?.stockFactsVersion};if(!chartData.isLive&&payload!==chartData&&facts&&!marketCacheSources.get(chartData)?.notice){if(payload.previewVersion===1)saveStockPreview(canonicalStockCode(stock.code),stock.date,payload);else saveStockCache(canonicalStockCode(stock.code),stock.date,payload);}hover.card.dataset.cacheSource=marketCacheSources.get(chartData)?.source||'network';hover.card.dataset.loadMs=(performance.now()-loadStarted).toFixed(1);complete=true;if(requestId!==hover.requestId||hover.anchor!==anchor||!stockHoverContextCurrent(context,anchor))return;
-      const renderStarted=performance.now();hover.stock=stock;if(hover.entries?.size){hover.card.querySelector('.vl-stock-preview-info').innerHTML=ladderStockPreviewInfo(stock,payload);updateHoverCharts(hover,payload,stock.date);}else mountHoverCharts(hover,payload,stock.date,stock.code,ladderStockPreviewInfo(stock,payload));hover.card.dataset.renderMs=(performance.now()-renderStarted).toFixed(1);applyHoverCacheNote(hover,marketCacheSources.get(chartData));
+      const [chartData,facts]=await Promise.all([getLadderStockChartData(stock,{showLatest,fifteenFutureDays:context.mode==='tracking'?0:15}),(stock.date===shanghaiDateKey()?Promise.resolve(null):getLadderStockFacts(stock,context.dataVersion||context.view?.dataVersion)).catch(error=>{console.warn('个股基本信息读取失败',error);return null;})]),payload=chartData.isLive||chartData.previewFacts===facts||marketCacheSources.get(chartData)?.notice&&chartData.previewFacts?chartData:{...chartData,previewFacts:facts,previewFactsVersion:facts?.stockFactsVersion||stockMeta?.stockFactsVersion};if(!chartData.isLive&&payload!==chartData&&facts&&!marketCacheSources.get(chartData)?.notice){if(payload.previewVersion===1)saveStockPreview(canonicalStockCode(stock.code),stock.date,payload);else saveStockCache(canonicalStockCode(stock.code),stock.date,payload);}hover.card.dataset.cacheSource=marketCacheSources.get(chartData)?.source||'network';hover.card.dataset.loadMs=(performance.now()-loadStarted).toFixed(1);complete=true;if(requestId!==hover.requestId||hover.anchor!==anchor||!stockHoverContextCurrent(context,anchor,hover))return;
+      const renderStarted=performance.now();hover.stock=stock;if(hover.entries?.size){hover.card.querySelector('.vl-stock-preview-info').innerHTML=ladderStockPreviewInfo(stock,payload,hover);updateHoverCharts(hover,payload,stock.date);}else mountHoverCharts(hover,payload,stock.date,stock.code,ladderStockPreviewInfo(stock,payload,hover));hover.card.dataset.renderMs=(performance.now()-renderStarted).toFixed(1);applyHoverCacheNote(hover,marketCacheSources.get(chartData));
       if(payload.isLive)scheduleLiveHoverRefresh(hover,async()=>{
         const next=await getLadderStockChartData(stock,{force:true,showLatest,fifteenFutureDays:context.mode==='tracking'?0:15});
-        if(requestId!==hover.requestId||hover.anchor!==anchor||!stockHoverContextCurrent(context,anchor))return;
+        if(requestId!==hover.requestId||hover.anchor!==anchor||!stockHoverContextCurrent(context,anchor,hover))return;
         if(!next.isLive)return;
-        hover.card.querySelector('.vl-stock-preview-info').innerHTML=ladderStockPreviewInfo(stock,next);applyHoverCacheNote(hover,marketCacheSources.get(next));updateHoverCharts(hover,next,stock.date);
+        hover.card.querySelector('.vl-stock-preview-info').innerHTML=ladderStockPreviewInfo(stock,next,hover);applyHoverCacheNote(hover,marketCacheSources.get(next));updateHoverCharts(hover,next,stock.date);
       });
       hover.resizeObserver=new ResizeObserver(()=>{if(hover.pinned)clampPinnedPreview(hover.card);if(!hover.card.hidden)for(const chart of hover.charts){chart.resize();chart.setOffsetRightDistance(0);chart.scrollToRealTime(0);}});hover.resizeObserver.observe(hover.card);
       document.documentElement.dataset.stockMemoryCount=String(stockMemoryCache.size);document.documentElement.dataset.stockMemoryBytes=String(stockMemoryCache.bytes);document.documentElement.dataset.liveStockMemoryCount=String(liveStockMemoryCache.size);
       if(payload.isLive&&marketCacheSources.get(chartData)?.refresh)queueMicrotask(()=>{if(requestId===hover.requestId&&!hover.card.hidden)refreshPushedHover(hover);});
-    }catch(error){complete=true;if(requestId!==hover.requestId||hover.anchor!==anchor||!stockHoverContextCurrent(context,anchor))return;for(const id of hover.chartIds)try{window.klinecharts.dispose(id);}catch{}hover.chartIds=[];hover.charts=[];hover.entries=null;for(const field of ['cacheSource','loadMs','renderMs','chartReused','dailyReadyMs','dailyPreloaded'])delete hover.card.dataset[field];hover.card.innerHTML=ladderStockPreviewInfo(stock,null)+'<div class="vl-stock-preview-loading">行情读取失败：'+esc(error.message)+'</div>';positionLadderStockHover(anchor,hover.card);}
+    }catch(error){complete=true;if(requestId!==hover.requestId||hover.anchor!==anchor||!stockHoverContextCurrent(context,anchor,hover))return;for(const id of hover.chartIds)try{window.klinecharts.dispose(id);}catch{}hover.chartIds=[];hover.charts=[];hover.entries=null;for(const field of ['cacheSource','loadMs','renderMs','chartReused','dailyReadyMs','dailyPreloaded'])delete hover.card.dataset[field];hover.card.innerHTML=ladderStockPreviewInfo(stock,null,hover)+'<div class="vl-stock-preview-loading">行情读取失败：'+esc(error.message)+'</div>';positionLadderStockHover(anchor,hover.card);}
   }
   function ensureLadderStockHover(){
     if(ladderStockHover)return ladderStockHover;
     const card=document.createElement('section');card.id='ladderStockHover';card.className='vl-stock-preview';card.hidden=true;card.setAttribute('role','dialog');card.tabIndex=-1;document.body.append(card);
     const hover=ladderStockHover={card,requestId:0,showTimer:0,hideTimer:0,anchor:null,chartIds:[],charts:[],pinned:false};
-    installPreviewControls(hover,closeLadderStockHover);
-    const scheduleHide=()=>{clearTimeout(hover.hideTimer);hover.hideTimer=setTimeout(closeLadderStockHover,180);};
+    registerPreview(hover,'stock',closeLadderStockHover);installPreviewControls(hover,hover.close);hover.events=new AbortController();
+    const scheduleHide=()=>{clearTimeout(hover.hideTimer);hover.hideTimer=setTimeout(()=>hover.close(),180);};
     card.addEventListener('pointerenter',()=>{clearTimeout(hover.hideTimer);if(ladderTopicHover)clearTimeout(ladderTopicHover.hideTimer);if(ladderNestedThemeHover)clearTimeout(ladderNestedThemeHover.hideTimer);});
     card.addEventListener('pointerleave',event=>{if(hover.anchor?.contains(event.relatedTarget))return;scheduleHide();if(ladderTopicHover&&!ladderTopicHover.card.contains(event.relatedTarget)&&!ladderNestedThemeHover?.card.contains(event.relatedTarget))ladderTopicHover.hideTimer=setTimeout(closeLadderTopicHover,200);});
-    document.addEventListener('pointerover',event=>{const anchor=event.target.closest(ladderStockPreviewSelector);if(!anchor||anchor.contains(event.relatedTarget))return;clearTimeout(hover.showTimer);clearTimeout(hover.hideTimer);if(ladderTopicHover)clearTimeout(ladderTopicHover.hideTimer);if(ladderNestedThemeHover)clearTimeout(ladderNestedThemeHover.hideTimer);if(hover.anchor===anchor&&!card.hidden)return;const context=resolveStockHoverContext(anchor),stock=context&&ladderStockHoverRecord(context,anchor),key=stock&&hoverPoolKey('stock',stock.code,stock.date,context?.mode==='tracking'?trackingShowLatest:ladderShowLatest)+(context?.mode==='tracking'?':tracking:'+trackingDailyStart(stock):'');hover.showTimer=setTimeout(()=>showLadderStockHover(anchor),key&&hoverChartPool.has(key)?100:280);});
-    document.addEventListener('pointerout',event=>{const anchor=event.target.closest(ladderStockPreviewSelector);if(!anchor||anchor.contains(event.relatedTarget))return;clearTimeout(hover.showTimer);if(card.contains(event.relatedTarget))return;scheduleHide();});
-    document.addEventListener('focusin',event=>{const anchor=event.target.closest(ladderStockPreviewSelector);if(anchor)showLadderStockHover(anchor);});
-    document.addEventListener('keydown',event=>{if(event.key==='Escape'&&!card.hidden){event.preventDefault();closeLadderStockHover(true);}},true);
-    document.addEventListener('scroll',event=>{if(!card.hidden&&!card.contains(event.target)&&!event.target.closest?.('#ladderTopicHover,#ladderNestedThemeHover'))closeLadderStockHover();},true);
-    window.addEventListener('resize',closeLadderStockHover);return hover;
+    addPreviewDocumentListener(hover,'pointerover',event=>{const anchor=event.target.closest(ladderStockPreviewSelector);if(!anchor||anchor.contains(event.relatedTarget))return;clearTimeout(hover.showTimer);clearTimeout(hover.hideTimer);if(ladderTopicHover)clearTimeout(ladderTopicHover.hideTimer);if(ladderNestedThemeHover)clearTimeout(ladderNestedThemeHover.hideTimer);if(hover.anchor===anchor&&!card.hidden)return;const context=resolveStockHoverContext(anchor),stock=context&&ladderStockHoverRecord(context,anchor),key=stock&&hoverPoolKey('stock',stock.code,stock.date,context?.mode==='tracking'?trackingShowLatest:ladderShowLatest)+(context?.mode==='tracking'?':tracking:'+trackingDailyStart(stock):'');hover.showTimer=setTimeout(()=>showLadderStockHover(anchor),key&&hoverChartPool.has(key)?100:280);});
+    addPreviewDocumentListener(hover,'pointerout',event=>{const anchor=event.target.closest(ladderStockPreviewSelector);if(!anchor||anchor.contains(event.relatedTarget))return;clearTimeout(hover.showTimer);if(card.contains(event.relatedTarget))return;scheduleHide();});
+    addPreviewDocumentListener(hover,'focusin',event=>{const anchor=event.target.closest(ladderStockPreviewSelector);if(anchor)showLadderStockHover(anchor);});
+    addPreviewDocumentListener(hover,'keydown',event=>{if(event.key==='Escape'&&!card.hidden){event.preventDefault();closeLadderStockHover(true);}},true);
+    addPreviewDocumentListener(hover,'scroll',event=>{if(!card.hidden&&!card.contains(event.target)&&!event.target.closest?.('[data-preview-kind=topic],[data-preview-kind=nested]'))closeLadderStockHover();},true);
+    window.addEventListener('resize',()=>{if(hover.pinned)clampPinnedPreview(card);else hover.close();},{signal:hover.events.signal});return hover;
   }
   function setupLadderStockHover(fullData,view){
     const stocks=new Map([...(fullData.sealedStocks||[]),...fullData.nodes].map(stock=>[stock.id,{...stock,status:stock.status==='failed'?'unpromoted':stock.status}]));
@@ -1517,73 +1551,78 @@
     return {...base,isLive:true,oneMin:first.bars,fifteenMin:second.bars,daily:first.daily,updatedAt:one.updatedAt||new Date().toISOString()};
   }
   let indexHover=null;
-  function closeIndexHover(force=false){
-    const hover=indexHover;if(!hover||(hover.pinned&&force!==true))return;hover.pinned=false;hover.drag=null;hover.card.classList.remove('is-pinned','is-dragging');clearTimeout(hover.showTimer);clearTimeout(hover.hideTimer);clearTimeout(hover.liveTimer);hover.liveRefresh=null;hover.liveRefreshPending=false;hover.requestId++;hover.anchor=null;hover.resizeObserver?.disconnect();hover.resizeObserver=null;
-    parkHoverCharts(hover);hover.card.hidden=true;hover.entries=null;hover.chartIds=[];hover.charts=[];hover.lastPayload=null;hover.lastSignature='';hover.cacheKey='';hover.card.replaceChildren();flushPendingLiveLadder();
+  function closeIndexHover(force=false,target=null){
+    const hover=target||indexHover;if(!hover||(hover.pinned&&force!==true))return;hover.pinned=false;hover.drag=null;hover.card.classList.remove('is-pinned','is-dragging');clearTimeout(hover.showTimer);clearTimeout(hover.hideTimer);clearTimeout(hover.liveTimer);hover.liveRefresh=null;hover.liveRefreshPending=false;hover.requestId++;hover.anchor=null;hover.resizeObserver?.disconnect();hover.resizeObserver=null;
+    parkHoverCharts(hover);hover.card.hidden=true;hover.entries=null;hover.chartIds=[];hover.charts=[];hover.lastPayload=null;hover.lastSignature='';hover.cacheKey='';hover.card.replaceChildren();destroyRetiredPreview(hover);flushPendingLiveLadder();
   }
-  function indexPreviewInfo(item,date,daily=[]){
+  function indexPreviewInfo(item,date,daily=[],hover=indexHover){
     const bar=daily.find(bar=>chartDayKey(bar)===date),previous=daily.filter(bar=>chartDayKey(bar)<date).at(-1),prior=Number(previous?.close),close=Number(bar?.close),pct=bar?.pct_chg??(bar&&prior>0?(close/prior-1)*100:null),percent=value=>value==null||!Number.isFinite(Number(value))?'—':(Number(value)>0?'+':'')+Number(value).toFixed(2)+'%',price=value=>value==null?'—':num(value),tone=pct==null?'':Number(pct)>=0?'pct-up':'pct-down';
     const facts=[['收盘点位',price(bar?.close),tone],['涨幅',percent(pct),tone],['振幅',bar&&prior>0?((Number(bar.high)-Number(bar.low))/prior*100).toFixed(2)+'%':'—'],['开盘涨幅',bar&&prior>0?percent((Number(bar.open)/prior-1)*100):'—'],['开盘',price(bar?.open)],['最高',price(bar?.high)],['最低',price(bar?.low)],['成交额',bar?.amount==null?'—':compactYuan(Number(bar.amount)*1000)]];
-    return `<header class="vl-stock-preview-head"><span class="vl-index-preview-badge">指</span><button type="button" class="index-name-link" data-preview-open-index="${item.code}" data-index-date="${date}">${esc(item.name)}</button><span>${esc(item.code)}</span><time>${esc(fmtDate(date))}</time>${previewControls(indexHover)}</header><div class="vl-stock-preview-facts">${facts.map(([label,value,tone])=>`<div><span>${label}</span><b${tone?` class="${tone}"`:''}>${esc(value)}</b></div>`).join('')}</div>`;
+    return `<header class="vl-stock-preview-head"><span class="vl-index-preview-badge">指</span><button type="button" class="index-name-link" data-preview-open-index="${item.code}" data-index-date="${date}">${esc(item.name)}</button><span>${esc(item.code)}</span><time>${esc(fmtDate(date))}</time>${previewControls(hover)}</header><div class="vl-stock-preview-facts">${facts.map(([label,value,tone])=>`<div><span>${label}</span><b${tone?` class="${tone}"`:''}>${esc(value)}</b></div>`).join('')}</div>`;
   }
   async function showIndexHover(anchor){
-    if(Watchlists.isOpen||indexHover?.pinned)return;
+    if(Watchlists.isOpen)return;
     const item=INDEX_CATALOG.find(item=>item.code===anchor.dataset.indexPreview),date=anchor.dataset.indexDate;
     if(!item||(!state.dates.includes(date)&&date!==shanghaiDateKey())||!anchor.isConnected)return;
     const hover=indexHover,route=location.href;closeIndexHover();closeLadderStockHover();if(ladderTopicHover)clearTimeout(ladderTopicHover.hideTimer);
     hover.anchor=anchor;const requestId=++hover.requestId,loadStarted=performance.now(),current=()=>requestId===hover.requestId&&hover.anchor===anchor&&(anchor.isConnected||hover.pinned)&&location.href===route;
-    hover.card.dataset.index=item.code;hover.card.dataset.date=date;hover.card.setAttribute('aria-label',item.name+' · 基本信息与行情');hover.card.innerHTML=indexPreviewInfo(item,date)+'<div class="vl-stock-preview-loading" aria-live="polite">正在读取指数行情…</div>';hover.card.hidden=false;positionLadderStockHover(anchor,hover.card);
+    hover.card.dataset.index=item.code;hover.card.dataset.date=date;hover.card.setAttribute('aria-label',item.name+' · 基本信息与行情');hover.card.innerHTML=indexPreviewInfo(item,date,[],hover)+'<div class="vl-stock-preview-loading" aria-live="polite">正在读取指数行情…</div>';hover.card.hidden=false;hover.card.style.zIndex=String(++previewZ);positionLadderStockHover(anchor,hover.card);
     try{
       const payload=await getIndexHoverPayload(item,date);hover.card.dataset.cacheSource=marketCacheSources.get(payload)?.source||'network';if(!current()){if(requestId===hover.requestId)closeIndexHover();return;}
-      hover.card.dataset.loadMs=(performance.now()-loadStarted).toFixed(1);const renderStarted=performance.now();mountHoverCharts(hover,payload,date,item.code,indexPreviewInfo(item,date,payload.daily||[]),true);hover.card.dataset.renderMs=(performance.now()-renderStarted).toFixed(1);
+      hover.card.dataset.loadMs=(performance.now()-loadStarted).toFixed(1);const renderStarted=performance.now();mountHoverCharts(hover,payload,date,item.code,indexPreviewInfo(item,date,payload.daily||[],hover),true);hover.card.dataset.renderMs=(performance.now()-renderStarted).toFixed(1);
       if(payload.isLive)scheduleLiveHoverRefresh(hover,async()=>{
         const next=await getIndexHoverPayload(item,date);if(!current()||!next.isLive)return;
-        const series=updateHoverCharts(hover,next,date);hover.card.querySelector('.vl-stock-preview-info').innerHTML=indexPreviewInfo(item,date,series.daily);
+        const series=updateHoverCharts(hover,next,date);hover.card.querySelector('.vl-stock-preview-info').innerHTML=indexPreviewInfo(item,date,series.daily,hover);
       });
       hover.resizeObserver=new ResizeObserver(()=>{if(hover.pinned)clampPinnedPreview(hover.card);if(!hover.card.hidden)for(const chart of hover.charts){chart.resize();chart.setOffsetRightDistance(0);chart.scrollToRealTime(0);}});hover.resizeObserver.observe(hover.card);
-    }catch(error){if(!current())return;hover.card.innerHTML=indexPreviewInfo(item,date)+'<div class="vl-stock-preview-loading">行情读取失败：'+esc(error.message)+'</div>';positionLadderStockHover(anchor,hover.card);}
+    }catch(error){if(!current())return;hover.card.innerHTML=indexPreviewInfo(item,date,[],hover)+'<div class="vl-stock-preview-loading">行情读取失败：'+esc(error.message)+'</div>';positionLadderStockHover(anchor,hover.card);}
   }
   function setupIndexHover(){
     const card=document.createElement('section');card.id='indexHover';card.className='vl-stock-preview vl-index-preview';card.hidden=true;card.setAttribute('role','dialog');card.tabIndex=-1;document.body.append(card);
     const hover=indexHover={card,requestId:0,showTimer:0,hideTimer:0,anchor:null,chartIds:[],charts:[],pinned:false},selector='[data-index-preview][data-index-date]';
-    installPreviewControls(hover,closeIndexHover);
-    const scheduleHide=()=>{clearTimeout(hover.hideTimer);hover.hideTimer=setTimeout(closeIndexHover,180);};
+    registerPreview(hover,'index',closeIndexHover);installPreviewControls(hover,hover.close);hover.events=new AbortController();
+    const scheduleHide=()=>{clearTimeout(hover.hideTimer);hover.hideTimer=setTimeout(()=>hover.close(),180);};
     card.addEventListener('pointerenter',()=>{clearTimeout(hover.hideTimer);if(ladderTopicHover)clearTimeout(ladderTopicHover.hideTimer);});
     card.addEventListener('pointerleave',event=>{if(hover.anchor?.contains(event.relatedTarget))return;scheduleHide();if(ladderTopicHover&&!ladderTopicHover.card.contains(event.relatedTarget))ladderTopicHover.hideTimer=setTimeout(closeLadderTopicHover,220);});
-    document.addEventListener('pointerover',event=>{const anchor=event.target.closest(selector);if(!anchor||anchor.contains(event.relatedTarget))return;clearTimeout(hover.showTimer);clearTimeout(hover.hideTimer);if(ladderTopicHover)clearTimeout(ladderTopicHover.hideTimer);if(hover.anchor===anchor&&!card.hidden)return;hover.showTimer=setTimeout(()=>showIndexHover(anchor),hoverChartPool.has(hoverPoolKey('index',anchor.dataset.indexPreview,anchor.dataset.indexDate))?100:280);});
-    document.addEventListener('pointerout',event=>{const anchor=event.target.closest(selector);if(!anchor||anchor.contains(event.relatedTarget))return;clearTimeout(hover.showTimer);if(card.contains(event.relatedTarget))return;scheduleHide();});
-    document.addEventListener('focusin',event=>{const anchor=event.target.closest(selector);if(anchor)requestAnimationFrame(()=>{if(document.activeElement===anchor&&anchor.isConnected)showIndexHover(anchor);});});
-    document.addEventListener('focusout',event=>{if(event.target.closest(selector)&&!card.contains(event.relatedTarget))scheduleHide();});
-    document.addEventListener('click',event=>{const anchor=event.target.closest(selector+',[data-preview-open-index]');if(!anchor)return;event.preventDefault();event.stopPropagation();openIndex(anchor.dataset.indexPreview||anchor.dataset.previewOpenIndex,anchor.dataset.indexDate);});
-    document.addEventListener('keydown',event=>{if(event.key==='Escape'&&!card.hidden){event.preventDefault();event.stopPropagation();closeIndexHover(true);}},true);
-    document.addEventListener('scroll',event=>{if(!card.hidden&&!card.contains(event.target)&&!event.target.closest?.('#ladderTopicHover'))closeIndexHover();},true);
-    window.addEventListener('resize',closeIndexHover);
+    addPreviewDocumentListener(hover,'pointerover',event=>{const anchor=event.target.closest(selector);if(!anchor||anchor.contains(event.relatedTarget))return;clearTimeout(hover.showTimer);clearTimeout(hover.hideTimer);if(ladderTopicHover)clearTimeout(ladderTopicHover.hideTimer);if(hover.anchor===anchor&&!card.hidden)return;hover.showTimer=setTimeout(()=>showIndexHover(anchor),hoverChartPool.has(hoverPoolKey('index',anchor.dataset.indexPreview,anchor.dataset.indexDate))?100:280);});
+    addPreviewDocumentListener(hover,'pointerout',event=>{const anchor=event.target.closest(selector);if(!anchor||anchor.contains(event.relatedTarget))return;clearTimeout(hover.showTimer);if(card.contains(event.relatedTarget))return;scheduleHide();});
+    addPreviewDocumentListener(hover,'focusin',event=>{const anchor=event.target.closest(selector);if(anchor)requestAnimationFrame(()=>{if(document.activeElement===anchor&&anchor.isConnected)showIndexHover(anchor);});});
+    addPreviewDocumentListener(hover,'focusout',event=>{if(event.target.closest(selector)&&!card.contains(event.relatedTarget))scheduleHide();});
+    if(!setupIndexHover.navigationInstalled){setupIndexHover.navigationInstalled=true;document.addEventListener('click',event=>{const anchor=event.target.closest(selector+',[data-preview-open-index]');if(!anchor)return;event.preventDefault();event.stopPropagation();openIndex(anchor.dataset.indexPreview||anchor.dataset.previewOpenIndex,anchor.dataset.indexDate);});}
+    addPreviewDocumentListener(hover,'keydown',event=>{if(event.key==='Escape'&&!card.hidden){event.preventDefault();event.stopPropagation();closeIndexHover(true);}},true);
+    addPreviewDocumentListener(hover,'scroll',event=>{if(!card.hidden&&!card.contains(event.target)&&!event.target.closest?.('[data-preview-kind=topic]'))closeIndexHover();},true);
+    window.addEventListener('resize',()=>{if(hover.pinned)clampPinnedPreview(card);else hover.close();},{signal:hover.events.signal});
   }
 
   let ladderNestedThemeHover=null;
-  function closeLadderNestedThemeHover(){if(Watchlists.isOpen)return;
-    const hover=ladderNestedThemeHover;if(!hover)return;
+  function closeLadderNestedThemeHover(force=false,target=null){if(Watchlists.isOpen&&force!==true)return;
+    if((target||ladderNestedThemeHover)?.pinned&&force!==true)return;
+    const hover=target||ladderNestedThemeHover;if(!hover)return;hover.pinned=false;
     if(hover.card.contains(ladderStockHover?.anchor))closeLadderStockHover();
-    clearTimeout(hover.showTimer);clearTimeout(hover.hideTimer);hover.requestId++;hover.anchor=null;hover.card.hidden=true;hover.card.onclick=null;
+    clearTimeout(hover.showTimer);clearTimeout(hover.hideTimer);hover.requestId++;hover.anchor=null;hover.card.hidden=true;hover.card.onclick=null;destroyRetiredPreview(hover);
   }
   function ensureLadderNestedThemeHover(){
     if(ladderNestedThemeHover)return ladderNestedThemeHover;
     const card=document.createElement('section');card.id='ladderNestedThemeHover';card.className='vl-topic-hover vl-nested-theme-hover';card.hidden=true;card.setAttribute('role','dialog');card.setAttribute('aria-label','题材当日涨停列表');card.tabIndex=-1;document.body.append(card);
     const hover=ladderNestedThemeHover={card,requestId:0,showTimer:0,hideTimer:0,anchor:null};
+    hover.events=new AbortController();
+    installTopicPreviewControls(hover,closeLadderNestedThemeHover);
     card.addEventListener('pointerenter',()=>{clearTimeout(hover.hideTimer);if(ladderTopicHover)clearTimeout(ladderTopicHover.hideTimer);});
-    card.addEventListener('pointerleave',event=>{if(ladderStockHover?.card.contains(event.relatedTarget))return;hover.hideTimer=setTimeout(closeLadderNestedThemeHover,180);if(ladderTopicHover&&!ladderTopicHover.card.contains(event.relatedTarget))ladderTopicHover.hideTimer=setTimeout(closeLadderTopicHover,220);});
+    card.addEventListener('pointerleave',event=>{if(ladderStockHover?.card.contains(event.relatedTarget))return;hover.hideTimer=setTimeout(()=>hover.close(),180);if(ladderTopicHover&&!ladderTopicHover.card.contains(event.relatedTarget))ladderTopicHover.hideTimer=setTimeout(closeLadderTopicHover,220);});
     card.addEventListener('focusin',()=>{clearTimeout(hover.hideTimer);if(ladderTopicHover)clearTimeout(ladderTopicHover.hideTimer);});
     return hover;
   }
   function setupLadderNestedThemeHover(fullData,view,navigateStock,navigateUnpromoted,navigateBroken){
-    const parent=ensureLadderTopicHover(),hover=ensureLadderNestedThemeHover(),selector='[data-vl-nested-theme][data-vl-nested-date]';
-    async function show(anchor){
+    const parent=ensureLadderTopicHover(),selector='[data-vl-nested-theme][data-vl-nested-date]';
+    let hover=ensureLadderNestedThemeHover();
+    async function show(anchor){hover=ensureLadderNestedThemeHover();return showOwned(anchor,hover);}
+    async function showOwned(anchor,hover){
       if(Watchlists.isOpen)return;
       if(ladderView!==view||view.data!==fullData||view.dragging||history.state?.view!=='ladder'||parent.card.hidden||!anchor.isConnected)return;
       closeLadderNestedThemeHover();clearTimeout(parent.hideTimer);hover.anchor=anchor;const requestId=++hover.requestId,theme=anchor.dataset.vlNestedTheme,date=anchor.dataset.vlNestedDate,key=date+':'+view.dataVersion,record=ladderDateDetailCache.get(key),cached=record&&Date.now()-record.savedAt<record.ttl?record.payload:null;
       let stocks=[];const sort={key:''};hover.card.style.setProperty('--ladder-theme-color',ladderThemeColor(theme));
-      const render=(details,loading=false,error=false)=>{Object.assign(sort,{details,loading,error});stocks=ladderDateHoverStocks(fullData,date,details||{brokenStocks:(fullData.brokenStocks||[]).filter(stock=>stock.date===date)}).filter(stock=>stock.theme===theme);hover.card.innerHTML=renderLadderTopicHover(theme,date,stocks,details,loading,error,false,sort.key);positionLadderTopicHover(anchor,hover.card);};
-      render(cached,!cached);hover.card.hidden=false;positionLadderTopicHover(anchor,hover.card);
+      const render=(details,loading=false,error=false)=>{Object.assign(sort,{details,loading,error});stocks=ladderDateHoverStocks(fullData,date,details||{brokenStocks:(fullData.brokenStocks||[]).filter(stock=>stock.date===date)}).filter(stock=>stock.theme===theme);hover.stockContext={owner:hover,fullData,view,stocks:new Map(stocks.map(stock=>[stock.id,stock]))};hover.card.innerHTML=renderLadderTopicHover(theme,date,stocks,details,loading,error,false,sort.key);positionLadderTopicHover(anchor,hover.card);};
+      render(cached,!cached);hover.card.hidden=false;hover.card.style.zIndex=String(++previewZ);positionLadderTopicHover(anchor,hover.card);
       hover.card.onclick=event=>{if(sortLadderTopicHover(event,hover,sort,render))return;const row=event.target.closest('[data-vl-hover-stock]');if(!row)return;event.preventDefault();const stock=stocks.find(item=>item.id===row.dataset.vlHoverStock);closeLadderTopicHover();if(stock?.status==='unpromoted')navigateUnpromoted(stock.id,stock);else if(stock?.status==='broken')navigateBroken(stock);else if(stock)navigateStock(stock.id,stock);};
       if(cached)return;
       try{const details=await getLadderDateDetails(date,view.dataVersion);if(requestId!==hover.requestId||hover.anchor!==anchor||ladderView!==view||view.data!==fullData||!anchor.isConnected||parent.card.hidden)return;render(details);}
@@ -1596,9 +1635,13 @@
   }
 
   function setupLadderTopicHover(host,fullData,view,navigateStock,navigateUnpromoted,navigateBroken,navigateTheme){
-    const hover=ensureLadderTopicHover();setupLadderNestedThemeHover(fullData,view,navigateStock,navigateUnpromoted,navigateBroken);
+    let hover=ensureLadderTopicHover();setupLadderNestedThemeHover(fullData,view,navigateStock,navigateUnpromoted,navigateBroken);
     const navigateTitle=event=>{const title=event.target.closest('[data-vl-hover-theme]');if(!title)return false;event.preventDefault();event.stopPropagation();const theme=title.dataset.vlHoverTheme,date=title.dataset.vlHoverThemeDate;closeLadderTopicHover();navigateTheme(theme,date);return true;};
     async function show(anchor){
+      hover=ensureLadderTopicHover();setupLadderNestedThemeHover(fullData,view,navigateStock,navigateUnpromoted,navigateBroken);
+      const currentHover=hover;return showOwned(anchor,currentHover);
+    }
+    async function showOwned(anchor,hover){
       if(Watchlists.isOpen)return;
       if(ladderView!==view||view.data!==fullData||view.dragging||history.state?.view!=='ladder'||!anchor.isConnected)return;
       const isDate=anchor.hasAttribute('data-vl-date'),theme=anchor.dataset.vlTopic,date=isDate?anchor.dataset.vlDate:anchor.dataset.vlTopicDate;
@@ -1606,7 +1649,7 @@
       if(anchor.hasAttribute('data-vl-topic-dates')){
         const days=JSON.parse(anchor.dataset.vlTopicDates||'[]').filter(day=>day<=view.endDay).sort();if(!days.length)return;
         const stocks=days.flatMap(day=>ladderDateHoverStocks(fullData,day,{brokenStocks:(fullData.brokenStocks||[]).filter(stock=>stock.date===day)})).filter(stock=>stock.theme===theme);
-        hover.card.dataset.hoverMode='range';hover.card.dataset.rangeDays=String(days.length);hover.card.classList.remove('vl-date-hover');hover.card.classList.add('vl-range-hover');hover.card.setAttribute('aria-label','题材区间天梯表');hover.card.style.setProperty('--ladder-theme-color',ladderThemeColor(theme));hover.card.innerHTML=renderLadderLegendRange(theme,days,stocks);hover.card.hidden=false;positionLadderTopicHover(anchor,hover.card);
+        hover.card.dataset.hoverMode='range';hover.card.dataset.rangeDays=String(days.length);hover.card.classList.remove('vl-date-hover');hover.card.classList.add('vl-range-hover');hover.card.setAttribute('aria-label','题材区间天梯表');hover.card.style.setProperty('--ladder-theme-color',ladderThemeColor(theme));hover.stockContext={owner:hover,fullData,view,stocks:new Map(stocks.map(stock=>[stock.id,stock]))};hover.card.innerHTML=renderLadderLegendRange(theme,days,stocks);hover.card.hidden=false;hover.card.style.zIndex=String(++previewZ);positionLadderTopicHover(anchor,hover.card);
         hover.card.onclick=event=>{if(navigateTitle(event))return;const row=event.target.closest('[data-vl-range-hover-stock]');if(!row)return;event.preventDefault();const stock=stocks.find(stock=>stock.id===row.dataset.vlRangeHoverStock);closeLadderTopicHover();if(stock?.status==='unpromoted')navigateUnpromoted(stock.id,stock);else if(stock?.status==='broken')navigateBroken(stock);else if(stock)navigateStock(stock.id,stock);};return;
       }
       hover.card.classList.remove('vl-range-hover');
@@ -1616,11 +1659,11 @@
       let stocks=roster(cached);const sort={key:''};
       hover.card.dataset.hoverMode=isDate?'date':'topic';hover.card.classList.toggle('vl-date-hover',isDate);hover.card.setAttribute('aria-label',isDate?'当日天梯列表':'题材当日涨停列表');
       hover.card.style.setProperty('--ladder-theme-color',isDate?'var(--green)':ladderThemeColor(theme));
-      const render=(details,loading=false,error=false)=>{Object.assign(sort,{details,loading,error});closeLadderNestedThemeHover();stocks=roster(details);hover.card.innerHTML=isDate?renderLadderDateHover(date,stocks,details,loading,error):renderLadderTopicHover(theme,date,stocks,details,loading,error,Boolean(anchor.closest('#ladderLegend')),sort.key);positionLadderTopicHover(anchor,hover.card);};
-      render(cached,!cached);hover.card.hidden=false;positionLadderTopicHover(anchor,hover.card);
+      const render=(details,loading=false,error=false)=>{Object.assign(sort,{details,loading,error});if(ladderNestedThemeHover?.anchor&&hover.card.contains(ladderNestedThemeHover.anchor))closeLadderNestedThemeHover();stocks=roster(details);hover.stockContext={owner:hover,fullData,view,stocks:new Map(stocks.map(stock=>[stock.id,stock]))};hover.card.innerHTML=isDate?renderLadderDateHover(date,stocks,details,loading,error):renderLadderTopicHover(theme,date,stocks,details,loading,error,Boolean(anchor.closest('#ladderLegend')),sort.key);positionLadderTopicHover(anchor,hover.card);};
+      render(cached,!cached);hover.card.hidden=false;hover.card.style.zIndex=String(++previewZ);positionLadderTopicHover(anchor,hover.card);
       hover.card.onclick=event=>{if(!isDate&&sortLadderTopicHover(event,hover,sort,render))return;if(navigateTitle(event))return;const row=event.target.closest(isDate?'[data-vl-date-hover-stock]':'[data-vl-hover-stock]');if(!row)return;event.preventDefault();const id=isDate?row.dataset.vlDateHoverStock:row.dataset.vlHoverStock,stock=stocks.find(item=>item.id===id);closeLadderTopicHover();if(stock?.status==='unpromoted')navigateUnpromoted(id,stock);else if(stock?.status==='broken')navigateBroken(stock);else navigateStock(id,stock);};
       if(cached)return;
-      try{const details=await getLadderDateDetails(date,view.dataVersion);if(requestId!==hover.requestId||hover.anchor!==anchor||ladderView!==view||view.data!==fullData||history.state?.view!=='ladder')return;render(details);}
+      try{const details=await getLadderDateDetails(date,view.dataVersion);if(requestId!==hover.requestId||hover.anchor!==anchor||ladderView!==view||(!hover.pinned&&view.data!==fullData)||history.state?.view!=='ladder')return;render(details);}
       catch(error){if(requestId!==hover.requestId||hover.anchor!==anchor)return;render(null,false,true);}
     }
     for(const surface of [host,$('#ladderLegend')].filter(Boolean)){
@@ -2884,7 +2927,7 @@
       document.documentElement.dataset.navigationReview='loading';
       const pending=getReviewData(day);pending.catch(()=>{});
       await renderLimitupLadder();if(ladderView)updateLadderReview(day,ladderView,pending);
-    }else if(await loadDate(initialDate,{renderHomePage:initialRoute.view==='home'})&&initialRoute.view!=='home')await restoreBrowserRoute(initialRoute);window.addEventListener('popstate',event=>restoreBrowserRoute(event.state?.tradingAlert?event.state:routeFromLocation()));}catch(e){content.innerHTML=`<div class="empty-state">${esc(e.message)}</div>`}document.body.append(datePicker);document.addEventListener('click',event=>{const trigger=event.target.closest('[data-date-picker-trigger]');if(trigger){if(activeDatePickerTrigger===trigger&&!datePicker.hidden)closeDatePicker();else openDatePicker(trigger);}});datePicker.onclick=async event=>{const button=event.target.closest('button');if(!button)return;if(button.dataset.month){const y=Number(calendarMonth.slice(0,4)),m=Number(calendarMonth.slice(4,6))+Number(button.dataset.month),d=new Date(Date.UTC(y,m-1,1));calendarMonth=`${d.getUTCFullYear()}${String(d.getUTCMonth()+1).padStart(2,'0')}`;renderDatePicker();return;}if(button.dataset.latest){const topicMode=activeDatePickerTrigger?.id==='topicDatePickerTrigger',dates=topicMode?Array.from(state.topicDates[state.topic]||[]).sort():state.dates,target=dates[dates.length-1];if(target)await chooseReviewDate(target);return;}if(button.dataset.date)await chooseReviewDate(button.dataset.date);};document.addEventListener('mousedown',event=>{if(!event.target.closest('[data-date-picker-trigger]')&&!datePicker.contains(event.target))closeDatePicker();});document.addEventListener('keydown',event=>{if(event.key==='Escape'&&!datePicker.hidden)closeDatePicker();});$('.collapse').onclick=()=>{const collapsed=!appShell.classList.contains('nav-collapsed');setNavigationCollapsed(collapsed);if(window.innerWidth<=700)$('.sidebar').classList.toggle('open',!collapsed);};$('#navReopen').onclick=()=>{setNavigationCollapsed(false);if(window.innerWidth<=700)$('.sidebar').classList.add('open');};setupSettings();setupSelection();}
+    }else if(await loadDate(initialDate,{renderHomePage:initialRoute.view==='home'})&&initialRoute.view!=='home')await restoreBrowserRoute(initialRoute);window.addEventListener('popstate',event=>{closeAllPinnedPreviews();restoreBrowserRoute(event.state?.tradingAlert?event.state:routeFromLocation());});}catch(e){content.innerHTML=`<div class="empty-state">${esc(e.message)}</div>`}document.body.append(datePicker);document.addEventListener('click',event=>{const trigger=event.target.closest('[data-date-picker-trigger]');if(trigger){if(activeDatePickerTrigger===trigger&&!datePicker.hidden)closeDatePicker();else openDatePicker(trigger);}});datePicker.onclick=async event=>{const button=event.target.closest('button');if(!button)return;if(button.dataset.month){const y=Number(calendarMonth.slice(0,4)),m=Number(calendarMonth.slice(4,6))+Number(button.dataset.month),d=new Date(Date.UTC(y,m-1,1));calendarMonth=`${d.getUTCFullYear()}${String(d.getUTCMonth()+1).padStart(2,'0')}`;renderDatePicker();return;}if(button.dataset.latest){const topicMode=activeDatePickerTrigger?.id==='topicDatePickerTrigger',dates=topicMode?Array.from(state.topicDates[state.topic]||[]).sort():state.dates,target=dates[dates.length-1];if(target)await chooseReviewDate(target);return;}if(button.dataset.date)await chooseReviewDate(button.dataset.date);};document.addEventListener('mousedown',event=>{if(!event.target.closest('[data-date-picker-trigger]')&&!datePicker.contains(event.target))closeDatePicker();});document.addEventListener('keydown',event=>{if(event.key==='Escape'&&!datePicker.hidden)closeDatePicker();});$('.collapse').onclick=()=>{const collapsed=!appShell.classList.contains('nav-collapsed');setNavigationCollapsed(collapsed);if(window.innerWidth<=700)$('.sidebar').classList.toggle('open',!collapsed);};$('#navReopen').onclick=()=>{setNavigationCollapsed(false);if(window.innerWidth<=700)$('.sidebar').classList.add('open');};setupSettings();setupSelection();}
   function fitUiScale(){const browserZoom=(window.devicePixelRatio||initialDevicePixelRatio)/initialDevicePixelRatio,layoutWidth=window.innerWidth*browserZoom,automatic=state.chartLayout==='grid'?1:Math.max(1,Math.min(1.4,layoutWidth/1440)),multiplier=state.uiScalePreference==='auto'?1:Number(state.uiScalePreference)||1,scale=Math.max(1,Math.min(1.8,automatic*multiplier));document.documentElement.style.zoom=String(scale);}
   window.addEventListener('resize',fitUiScale,{passive:true});fitUiScale();
   start();
