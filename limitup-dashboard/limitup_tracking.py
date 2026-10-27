@@ -13,6 +13,7 @@ TOP = [('continuous', '连板'), ('fresh_break', '2板以上刚断板'),
        ('return20', '11–20日再次涨停'), ('return30', '21–30日再次涨停')]
 BOTTOM = [('ma5', '回调到5日线'), ('origin', '回调到涨停起涨位置'),
           ('ma10', '回调到10日线'), ('ma20', '回调到20日线'), ('ma30', '回调到30日线'), ('ma60', '回调到60日线')]
+SIDEWAYS = ('sideways', '横盘调整')
 
 
 def number(value):
@@ -53,7 +54,7 @@ class LimitupTracking:
         live = live if live.get('available') and live.get('date') == day else {}
         revision = r.database_revision((r.BASIC_DB, r.KPL_DB, r.DBROOT/'offline/limitup_ladder.db'))
         signature = live.get('revision', '')
-        return r.cached_series(f'limitup-tracking:v8:{day}:{revision}:{signature}',
+        return r.cached_series(f'limitup-tracking:v9:{day}:{revision}:{signature}',
                                lambda:self._calculate(day, dates, live, revision), 10 if live else 300)
 
     def _events(self, dates, live):
@@ -137,11 +138,15 @@ class LimitupTracking:
         recent_start = dates[max(0,len(dates)-30)]
         codes = sorted(code for code, history in events.items() if history and history[-1]['date']>=recent_start)
         daily = self._daily(codes, dates, live)
-        groups = {key:[] for key,_ in [*TOP,*BOTTOM]}
+        groups = {key:[] for key,_ in [*TOP,*BOTTOM,SIDEWAYS]}
         stocks = {}
         previous_day = dates[-2] if len(dates)>1 else None
         with closing(sqlite3.connect(f'file:{self.r.BASIC_DB}?mode=ro',uri=True,timeout=3)) as c:
-            halted = {row[0] for row in c.execute("SELECT ts_code FROM tbl_cn_suspend WHERE trade_date=? AND suspend_type='S' AND coalesce(suspend_timing,'')=''",(day,))}
+            suspension_rows=c.execute("SELECT ts_code,trade_date,suspend_type FROM tbl_cn_suspend WHERE trade_date BETWEEN ? AND ? AND coalesce(suspend_timing,'')='' AND suspend_type IN ('S','R')",(dates[max(0,len(dates)-16)],day)).fetchall()
+            suspensions={(code,date) for code,date,kind in suspension_rows if kind=='S'}
+            resumptions={(code,date) for code,date,kind in suspension_rows if kind=='R'}
+            halted_days=suspensions-resumptions
+            halted={code for code,date in halted_days if date==day}
         missing = []
         for code in codes:
             history = events[code]
@@ -174,6 +179,26 @@ class LimitupTracking:
                     if key:
                         groups[key].append(code)
                         member.update(returnGap=gap, priorBoard=int(before.get('board') or 1), priorBoardPeriod=before.get('boardPeriod'), priorTheme=before.get('theme'), priorLimitDate=before['date'])
+            # 独立横盘信号，可与当日涨停或回调分类同时出现。
+            anchor = next((item for item in reversed(history) if item['date'] < day), None)
+            if current and code not in halted and anchor and anchor['date'] in index and len(bars)>=60:
+                elapsed = index[day]-index[anchor['date']]
+                by_day = {bar['date']:bar for bar in bars}
+                anchor_bar = by_day.get(anchor['date'])
+                interval = dates[index[anchor['date']]+1:index[day]+1]
+                if anchor_bar and 1<=elapsed<=15 and all(date in by_day or (code,date) in halted_days for date in interval):
+                    price=anchor_bar['close']
+                    ma5=sum(bar['close'] for bar in bars[-5:])/5
+                    ma30=sum(bar['close'] for bar in bars[-30:])/30
+                    ma60=sum(bar['close'] for bar in bars[-60:])/60
+                    if (price>0 and all(price*.85<=by_day[date]['close']<=price*1.05 for date in interval if date in by_day)
+                            and current['close']>ma5>ma30>ma60):
+                        groups['sideways'].append(code)
+                        member.update(sidewaysAnchorDate=anchor['date'],sidewaysAnchorPrice=price,
+                                      sidewaysDays=elapsed,sidewaysBoard=int(anchor.get('board') or 1),
+                                      sidewaysBoardPeriod=anchor.get('boardPeriod'),sidewaysTheme=anchor.get('theme'))
+                        member['signals']['sideways']=price
+            if sealed or code in halted:continue
             if sealed or code in halted:continue
             if not current:
                 missing.append(code)
@@ -198,14 +223,14 @@ class LimitupTracking:
                     break
         used = set(code for values in groups.values() for code in values)
         for key, values in groups.items():
-            values.sort(key=lambda code:(-(stocks[code].get('priorBoard',stocks[code]['board']) if key.startswith('return') else stocks[code]['board']), -int(stocks[code]['limitDate']), stocks[code]['name']))
+            values.sort(key=lambda code:(-(stocks[code].get('priorBoard',stocks[code]['board']) if key.startswith('return') else stocks[code].get('sidewaysBoard',stocks[code]['board']) if key=='sideways' else stocks[code]['board']), -int(stocks[code]['limitDate']), stocks[code]['name']))
         return {'date':day, 'previousDate':previous_day, 'lookback':30, 'startDate':recent_start,
                 'top':[{'key':key,'title':title,'codes':groups[key]} for key,title in TOP],
-                'bottom':[{'key':key,'title':title,'codes':groups[key]} for key,title in BOTTOM],
+                'bottom':[{'key':key,'title':title,'codes':groups[key]} for key,title in [*BOTTOM,SIDEWAYS]],
                 'stocks':{code:stocks[code] for code in used}, 'screenedCount':len(codes), 'missingDailyCount':len(missing),
                 'source':'online+offline' if live else 'offline', 'updatedAt':live.get('updatedAt'),
                 'dataVersion':revision, **self.r.stock_data_version(), 'calculationMs':round((time.perf_counter()-began)*1000,1),
-                'rules':{'pullbackPriority':[key for key,_ in BOTTOM], 'pullbackExclusive':True, 'touch':'low <= target <= high and close > target', 'candle':'lower shadow >= 3% of previous close or body <= 1% and range <= 3%', 'risingMA':'MA10/20/30/60 rise on each of last 3 sessions', 'relimitGap':'intervening exchange sessions, buckets 1-5/6-10/11-20/21-30', 'origin':'multi-board first limit close; single-board preceding close'}}
+                'rules':{'pullbackPriority':[key for key,_ in BOTTOM], 'pullbackExclusive':True, 'sideways':'independent; 1-15 sessions after prior seal; all closes within 85%-105% of adjusted seal close; close > MA5 > MA30 > MA60', 'touch':'low <= target <= high and close > target', 'candle':'lower shadow >= 3% of previous close or body <= 1% and range <= 3%', 'risingMA':'MA10/20/30/60 rise on each of last 3 sessions', 'relimitGap':'intervening exchange sessions, buckets 1-5/6-10/11-20/21-30', 'origin':'multi-board first limit close; single-board preceding close'}}
 
     def _short_events(self, dates, live):
         payload = self.r.limitup_ladder_data(dates[-1], min(62,len(dates)), live or None)

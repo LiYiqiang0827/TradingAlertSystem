@@ -801,7 +801,7 @@ body:has(.ladder-vertical) .topbar{display:none}.content:has(.ladder-vertical){p
 .tracking-heading{display:flex;align-items:baseline;gap:12px;margin:0 0 10px}.tracking-heading h1{font-size:20px;margin:0}.tracking-heading>span{font:10px var(--sans);color:var(--muted)}
 .tracking-section{margin-bottom:14px}.tracking-section h2{margin:0 0 6px;font:600 12px var(--sans)}
 .tracking-table-scroll{max-height:42vh;overflow:auto;border:1px solid var(--line);border-radius:7px;background:var(--paper)}
-.tracking-table{width:100%;min-width:calc(var(--tracking-columns)*150px);table-layout:fixed;border-collapse:separate;border-spacing:0}
+.tracking-table{width:100%;min-width:calc(var(--tracking-columns)*130px);table-layout:fixed;border-collapse:separate;border-spacing:0}
 .tracking-table th{position:sticky;top:0;z-index:1;background:#eef2ef;text-align:left;padding:7px 6px;font:600 10px var(--sans);white-space:nowrap;border-bottom:1px solid var(--line)}
 .tracking-table th small{margin-left:5px;font-weight:400;color:var(--muted)}
 .tracking-table td{padding:3px 5px;height:42px;vertical-align:top;border-bottom:1px solid #edf0ed;border-right:1px solid #edf0ed;overflow:hidden}
@@ -828,3 +828,4 @@ body:has(.ladder-vertical) .topbar{display:none}.content:has(.ladder-vertical){p
 
 /* One tracking table at a time leaves the remaining viewport for stock rows. */
 .tracking-section[hidden]{display:none!important}.tracking-tabs{display:flex;gap:4px;margin:0 0 9px;border-bottom:1px solid var(--line)}.tracking-tabs button{border:0;border-bottom:2px solid transparent;background:transparent;padding:7px 14px;color:var(--muted);font:600 12px var(--sans);cursor:pointer}.tracking-tabs button[aria-selected=true]{color:var(--green);border-bottom-color:var(--green)}.tracking-tabs button:focus-visible{outline:2px solid var(--green);outline-offset:-2px}.tracking-table-scroll{max-height:calc(100vh - 200px);min-height:200px}
+.tracking-table[style*="--tracking-columns:7"] .tracking-mini,.tracking-table[style*="--tracking-columns:7"] .tracking-mini .daily-kline-mini,.tracking-table[style*="--tracking-columns:7"] .tracking-mini svg{width:46px!important}

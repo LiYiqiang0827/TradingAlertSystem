@@ -2526,13 +2526,13 @@
     return `<span class="tracking-board${stock.currentBoard?'':' historical'}" title="${esc(title)}">${esc(label)}</span>`;
   }
   function trackingStockCard(stock,key,date){
-    const target=stock.signals?.[key],note=key.startsWith('return')?`前次 ${fmtDate(stock.priorLimitDate)} · ${stock.priorBoard}板 · 间隔${stock.returnGap}交易日`:key==='fresh_break'?`昨日 ${stock.boardPeriod}`:target!=null?`目标价 ${Number(target).toFixed(2)}${key==='origin'?' · 起涨日 '+fmtDate(stock.originDate):''}`:`涨停日 ${fmtDate(stock.limitDate)}`;
-    const repeat=key.startsWith('return'),badge=repeat?{...stock,board:stock.priorBoard,boardPeriod:stock.priorBoardPeriod||stock.priorBoard+'板',currentBoard:false}:stock,theme=repeat?(stock.priorTheme||stock.theme):stock.theme;
+    const target=stock.signals?.[key],note=key==='sideways'?`涨停日 ${fmtDate(stock.sidewaysAnchorDate)} · ${stock.sidewaysDays}交易日 · 基准 ${Number(stock.sidewaysAnchorPrice).toFixed(2)}`:key.startsWith('return')?`前次 ${fmtDate(stock.priorLimitDate)} · ${stock.priorBoard}板 · 间隔${stock.returnGap}交易日`:key==='fresh_break'?`昨日 ${stock.boardPeriod}`:target!=null?`目标价 ${Number(target).toFixed(2)}${key==='origin'?' · 起涨日 '+fmtDate(stock.originDate):''}`:`涨停日 ${fmtDate(stock.limitDate)}`;
+    const sideways=key==='sideways',repeat=key.startsWith('return'),badge=sideways?{...stock,board:stock.sidewaysBoard,boardPeriod:stock.sidewaysBoardPeriod||stock.sidewaysBoard+'板',currentBoard:false}:repeat?{...stock,board:stock.priorBoard,boardPeriod:stock.priorBoardPeriod||stock.priorBoard+'板',currentBoard:false}:stock,theme=sideways?(stock.sidewaysTheme||stock.theme):repeat?(stock.priorTheme||stock.theme):stock.theme;
     return `<article class="tracking-stock" style="--tracking-theme-color:${esc(ladderThemeColor(theme))}" data-tracking-theme="${esc(theme)}" data-tracking-code="${esc(stock.code)}" title="${esc(stock.code+' · '+note)}"><div class="tracking-stock-copy"><div class="tracking-name-row">${trackingBadge(badge)}<span tabindex="0" data-tracking-stock-preview="${esc(date+':'+stock.code+':'+key)}" class="tracking-stock-name${isLadderGrowthStock(stock.code)?' growth':''}">${esc(stock.name)}</span></div><span class="tracking-theme" title="${esc(theme+' · '+fmtDate(repeat?stock.priorLimitDate:stock.limitDate))}">${esc(theme)}</span></div><div class="tracking-mini" data-tracking-mini="${esc(stock.code)}" aria-label="${esc(stock.name+'最近20日K线')}" data-date="${date}"></div></article>`;
   }
   function renderTrackingTables(payload){
     const host=$('#limitupTrackingContent');if(!host)return;
-    const descriptions={continuous:'当日仍连板',fresh_break:'昨日2板及以上，今日未封涨停',return5:'两次涨停之间有1–5个未涨停交易日',return10:'两次涨停之间有6–10个未涨停交易日',return20:'两次涨停之间有11–20个未涨停交易日',return30:'两次涨停之间有21–30个未涨停交易日',ma5:'当日价格区间触及MA5',ma10:'当日价格区间触及MA10',ma20:'当日价格区间触及MA20',ma30:'当日价格区间触及MA30',ma60:'当日价格区间触及MA60',origin:'连板取首板收盘价；首板取前一日收盘价'};
+    const descriptions={continuous:'当日仍连板',fresh_break:'昨日2板及以上，今日未封涨停',return5:'两次涨停之间有1–5个未涨停交易日',return10:'两次涨停之间有6–10个未涨停交易日',return20:'两次涨停之间有11–20个未涨停交易日',return30:'两次涨停之间有21–30个未涨停交易日',sideways:'涨停后1–15个交易日，收盘价均在涨停收盘价的85%–105%，收盘价>MA5>MA30>MA60；可同时出现在其他列',ma5:'当日价格区间触及MA5',ma10:'当日价格区间触及MA10',ma20:'当日价格区间触及MA20',ma30:'当日价格区间触及MA30',ma60:'当日价格区间触及MA60',origin:'连板取首板收盘价；首板取前一日收盘价'};
     const table=(key,columns)=>{
       const height=Math.max(0,...columns.map(c=>c.codes.length));
       return `<section class="tracking-section" id="tracking-panel-${key}" role="tabpanel" aria-labelledby="tracking-tab-${key}" ${trackingActiveTab===key?'':'hidden'}><div class="tracking-table-scroll"><table class="tracking-table" style="--tracking-columns:${columns.length}"><thead><tr>${columns.map(c=>`<th scope="col" title="${esc(descriptions[c.key]+'；按当时连板高度降序')}">${esc(c.title)}<small>${c.codes.length}</small></th>`).join('')}</tr></thead><tbody>${Array.from({length:Math.max(1,height)},(_,i)=>`<tr>${columns.map(c=>`<td>${c.codes[i]?trackingStockCard(payload.stocks[c.codes[i]],c.key,payload.date):i===0?'<span class="tracking-empty">—</span>':''}</td>`).join('')}</tr>`).join('')}</tbody></table></div></section>`;
@@ -2546,10 +2546,10 @@
     trackingTableSignatures.set(host,signature);
     const stocks=new Map();
     for(const column of [...payload.top,...payload.bottom])for(const code of column.codes){
-      const item=payload.stocks[code],repeat=column.key.startsWith('return'),id=payload.date+':'+code+':'+column.key;
-      const board=repeat?item.priorBoard:item.board,period=repeat?(item.priorBoardPeriod||board+'板'):item.boardPeriod;
-      stocks.set(id,{...item,id,date:payload.date,theme:repeat?(item.priorTheme||item.theme):item.theme,board,boardPeriod:period,
-        chartLimitDate:repeat?item.priorLimitDate:(item.originDate||item.limitDate),historicalBoard:repeat||!item.currentBoard,status:column.key==='fresh_break'?'unpromoted':repeat||!item.currentBoard?'historical':'sealed',
+      const item=payload.stocks[code],sideways=column.key==='sideways',repeat=column.key.startsWith('return'),id=payload.date+':'+code+':'+column.key;
+      const board=sideways?item.sidewaysBoard:repeat?item.priorBoard:item.board,period=sideways?(item.sidewaysBoardPeriod||board+'板'):repeat?(item.priorBoardPeriod||board+'板'):item.boardPeriod;
+      stocks.set(id,{...item,id,date:payload.date,theme:sideways?(item.sidewaysTheme||item.theme):repeat?(item.priorTheme||item.theme):item.theme,board,boardPeriod:period,
+        chartLimitDate:sideways?item.sidewaysAnchorDate:repeat?item.priorLimitDate:(item.originDate||item.limitDate),historicalBoard:sideways||repeat||!item.currentBoard,status:column.key==='fresh_break'?'unpromoted':sideways||repeat||!item.currentBoard?'historical':'sealed',
         previousBoard:item.board,previousBoardPeriod:item.boardPeriod});
     }
     trackingStockHoverContext={mode:'tracking',date:payload.date,dataVersion:payload.dataVersion,stocks};ensureLadderStockHover();
