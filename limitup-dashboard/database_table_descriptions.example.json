@@ -1,0 +1,217 @@
+{
+  "version": 1,
+  "description": "实际使用数据库的数据表内容简介。tables按表名精确匹配；patterns用?匹配单个字符。online适用于所有online-YYYYMM月库。可直接编辑，刷新状态后生效。",
+  "databases": {
+    "basic": {
+      "tables": {
+        "tbl_basic_ctrl": "基础行情各采集任务的日期断点及更新时间。",
+        "tbl_cn_basic": "A股代码、名称、上市日期、市场等证券基础信息。",
+        "tbl_cn_tradecal": "交易所开休市日历及前后交易日信息。",
+        "tbl_cn_day": "个股日线开高低收、成交量和成交额等行情。",
+        "tbl_cn_adj_factor": "按股票和交易日保存复权因子，供前复权计算。",
+        "tbl_cn_week": "前复权周K线行情，由日线聚合生成。",
+        "tbl_cn_month": "前复权月K线行情，由日线聚合生成。",
+        "tbl_cn_week_origin": "未复权周K线行情，保留原始价格口径。",
+        "tbl_cn_month_origin": "未复权月K线行情，保留原始价格口径。",
+        "tbl_cn_stk_limit": "每只股票每日的涨停价、跌停价等价格限制。",
+        "tbl_cn_suspend": "个股停牌、复牌事件，用于识别无交易和跨停牌连接。",
+        "tbl_cn_moneyflow": "个股每日资金流，含小单、中单、大单和特大单买卖额。",
+        "tbl_cn_daily_basic": "每日估值、市值、流通股本、换手率和量比等指标。",
+        "tbl_cn_margin": "交易所每日融资融券汇总。",
+        "tbl_cn_margin_detail": "个股每日融资融券余额及买卖明细。",
+        "tbl_cn_cyq_perf": "个股筹码成本、获利比例等筹码表现指标。"
+      }
+    },
+    "kpl": {
+      "tables": {
+        "tbl_kpl_ctrl": "开盘啦及相关榜单采集任务的日期断点。",
+        "tbl_cn_kpl_concept_cons": "开盘啦题材与成分股的对应关系快照。",
+        "tbl_cn_kpl_limit_performance": "开盘啦直接接口的涨停表现、板数、时间和题材分类，是当日题材划分的主要来源。",
+        "tbl_cn_kpl_list": "经Tushare获取的开盘啦涨停名单及题材信息，通常次日早晨补齐。",
+        "tbl_cn_limit_list": "每日涨停、跌停及炸板等涨跌停事件名单。",
+        "tbl_cn_top_list": "每日龙虎榜上榜股票及成交统计。",
+        "tbl_cn_top_inst": "龙虎榜营业部、机构席位的买卖明细。",
+        "tbl_cn_block_trade": "个股大宗交易明细。",
+        "tbl_cn_ggt_daily": "港股通每日成交统计。",
+        "tbl_cn_hsgt_top10": "沪深港通十大成交活跃股及资金统计。"
+      }
+    },
+    "index": {
+      "tables": {
+        "tbl_index_ctrl": "指数采集任务的日期断点与更新时间。",
+        "tbl_cn_index_basic": "指数代码、名称、市场及分类等基础信息。",
+        "tbl_cn_index_daily": "指数日K线、涨幅、成交量和成交额。",
+        "tbl_cn_index_weekly": "提前聚合并保存的指数周K线，减少页面实时聚合。",
+        "tbl_cn_index_monthly": "提前聚合并保存的指数月K线，减少页面实时聚合。"
+      }
+    },
+    "index-minute": {
+      "tables": {
+        "tbl_cn_index_minute": "正式指数1分钟、15分钟K线，按周期保存。",
+        "tbl_cn_index_minute_ctrl": "按指数、周期和交易日记录分钟数据根数、来源及获取时间。"
+      }
+    },
+    "one-minute": {
+      "tables": {
+        "one_min_bars（Parquet主数据）": "正式个股1分钟OHLC、成交量、成交额和因子，按交易日保存为Parquet分区。",
+        "one_min_ingest_catalog": "一分钟正式分区的导入目录、发布状态、行数及校验统计。",
+        "one_min_source_files": "历史CSV源文件的发现、选取、重复文件和完整性记录。",
+        "one_min_tdx_sync": "各股票TDX一分钟下载覆盖范围、实际返回日期及下载状态；不等于正式发布完成。",
+        "tbl_one_minute_ctrl": "一分钟正式数据的最大已发布交易日及成功写入时间。"
+      }
+    },
+    "fifteen-minute": {
+      "tables": {
+        "fifteen_min_bars": "TDX原生个股15分钟OHLC、成交量、成交额及复权因子。",
+        "fifteen_min_days": "每只股票每日15分钟根数、完整性状态和来源等写入清单。",
+        "fifteen_min_sync": "逐股票下载覆盖范围、实际数据日期、状态及错误信息。",
+        "fifteen_min_meta": "15分钟存储的格式版本等内部元数据。",
+        "tbl_fifteen_minute_ctrl": "15分钟正式落库数据的最大交易日及成功写入时间。"
+      }
+    },
+    "news": {
+      "tables": {
+        "tbl_news": "多个资讯源的原始财经新闻及发布时间。",
+        "tbl_major_news": "重点财经新闻原文，作为新闻事件清洗和分析的数据源。",
+        "tbl_cctv_news": "新闻联播等央视财经新闻记录。",
+        "tbl_news_ctrl": "各新闻来源的采集时间断点及更新时间。"
+      }
+    },
+    "theme": {
+      "tables": {
+        "dim_stock": "题材研究所用的股票维度及基础属性。",
+        "dim_theme": "题材主档、规范名称及题材标识。",
+        "dim_theme_taxonomy": "题材分类体系及层次信息。",
+        "dirty_entity_queue": "增量更新后需要重新计算的题材或股票任务队列。",
+        "fact_limit_event": "按交易日和股票记录涨停、破板及板数等原始事件。",
+        "fact_membership_snapshot": "每个历史截面的题材成分股快照。",
+        "fact_theme_daily": "题材每日涨停宽度、高度及活跃度等汇总指标。",
+        "fact_theme_episode": "题材活跃阶段、起止区间等周期研究结果。",
+        "graph_build_run": "题材库构建任务的范围、状态及完成时间。",
+        "graph_meta": "题材研究库的结构版本等内部元数据。",
+        "llm_analysis": "模型生成的题材研究或催化分析结果。",
+        "rel_limit_theme": "涨停事件与题材之间的对应关系。",
+        "rel_theme_stock_membership": "股票在题材中的成员关系及有效范围。",
+        "source_checkpoint": "各输入来源的同步日期及成功批次断点。",
+        "source_conflict": "不同来源之间的分类或数据冲突记录。",
+        "source_day_manifest": "按来源和日期记录的数据完整性清单。",
+        "theme_alias": "题材别名与规范题材名称之间的映射。"
+      }
+    },
+    "major-news": {
+      "tables": {
+        "dim_major_news_entity": "重点新闻分析涉及的公司、机构、人物等实体维度。",
+        "dim_major_news_theme_tag": "重点新闻涉及的题材标签维度。",
+        "fact_major_news_analysis": "单条重点新闻的模型分析、影响判断和证据。",
+        "fact_major_news_daily_analysis": "按日期汇总的重点新闻分析与复盘结果。",
+        "fact_major_news_semantic_event": "将内容相关的重点新闻归并得到的语义事件。",
+        "fact_news_event": "原始重点新闻经过规则清洗、去重后的新闻事件。",
+        "fact_news_insight": "新闻事件的结构化分析与影响洞察结果。",
+        "news_llm_run": "新闻模型分析调用批次、执行状态和时间记录。",
+        "pipeline_state": "新闻流水线的来源时间断点及处理版本。",
+        "rel_major_news_entity": "重点新闻或分析事件与相关实体之间的关系。",
+        "rel_major_news_semantic_member": "语义新闻事件与其原始新闻成员的关系。",
+        "rel_major_news_theme": "重点新闻或分析事件与题材标签的关系。",
+        "rel_news_event_member": "去重后新闻事件与原始新闻记录的对应关系。"
+      }
+    },
+    "ladder": {
+      "tables": {
+        "daily_stats": "每日涨停数、破板数及天梯汇总统计。",
+        "edges": "个股晋级、断板续连和跨停牌等节点连接关系。",
+        "followups": "节点后续交易日、下一实际交易日及涨幅，供未晋级判断使用。",
+        "metadata": "天梯结构版本、发布时间、最新日期等发布控制信息。",
+        "nodes": "按日期保存个股涨停和破板节点、板数、原始题材及行情属性。",
+        "theme_history": "涨停链题材归属的生效历史，支持按查询截止日选择题材。",
+        "trade_dates": "天梯可用交易日、相邻交易日和数据就绪状态。"
+      }
+    },
+    "attribution": {
+      "tables": {
+        "date_nodes": "每日涨停归因覆盖的交易日期节点。",
+        "import_runs": "日报入库批次、日期、数量、状态及完成时间。",
+        "schema_meta": "涨停归因SQLite库的结构版本。",
+        "source_documents": "分析日报来源路径、文件哈希及导入时间。",
+        "stock_nodes": "参与每日涨停归因的个股节点。",
+        "topic_date_nodes": "某个题材在某个交易日的题材日期节点。",
+        "topic_date_stock_edges": "题材日期与个股的关系，保存个股涨停原因和证据等内容。",
+        "topic_date_summary_edges": "题材与题材日期的关系，保存当日催化、强度、梯队及资金概览。",
+        "topic_nodes": "跨日期复用的题材主节点。"
+      }
+    },
+    "watchlists": {
+      "tables": {
+        "watchlist_group": "自选分组名称、排序及创建时间，含默认分组。",
+        "watchlist_member": "股票与自选分组的成员关系，记录加入该分组的时间。",
+        "watchlist_meta": "自选库版本和修订号，供Redis及浏览器缓存失效判断。",
+        "watchlist_stock": "自选股票代码、名称等基本信息。"
+      }
+    },
+    "index-fallback": {
+      "tables": {
+        "tbl_minute": "历史个股分钟记录；新数据进入正式分钟存储，此表不再作为新写入目标。",
+        "tbl_minute_ctrl": "历史个股分钟数据的日期与处理状态记录。",
+        "tbl_minute_index": "旧版指数分钟行情，部分较早历史查询仍会回退读取。",
+        "tbl_minute_index_ctrl": "旧版指数分钟数据的日期与处理状态记录。"
+      }
+    },
+    "online": {
+      "tables": {
+        "minute_source_quality": "分钟行情来源、数据质量及修正审计记录。",
+        "online_stream_cursor": "Redis Stream落盘消费游标、最近交易日及持久化时间。",
+        "online_stream_timestamp_quarantine": "时间戳异常的在线流隔离记录，供数据修复审计。",
+        "data_quality_merge_conflicts": "历史数据合并时发现的重复键或内容冲突记录。",
+        "snapshot_index_20261001_pre_quarantine_backup": "指数时间戳修复前的备份表，不参与正式行情读取。",
+        "snapshot_index_20261001_quarantine_redis_replay": "从Redis回放时隔离的异常指数记录，不参与正式行情读取。"
+      },
+      "patterns": {
+        "snapshot_????????": "全市场个股实时行情快照，含价格、涨幅及成交信息。 按交易日分表。",
+        "snapshot_index_????????": "核心指数实时行情快照，含点位、涨幅及成交额。 按交易日分表。",
+        "limitperformance_????????": "开盘啦实时涨停表现与题材分类快照。 按交易日分表。",
+        "zt_????????": "实时涨停股票池及封板相关指标。 按交易日分表。",
+        "break_????????": "实时触及涨停后开板的股票池及破板信息。 按交易日分表。",
+        "watchlist_????????": "盘前由近期涨停等来源生成的实时监控观察名单及来源，不是用户自选分组表。 按交易日分表。",
+        "minute_????????": "在线分钟行情及其增量记录。 按交易日分表。",
+        "orderbook_????????": "实时盘口买卖档位及委托数据。 按交易日分表。",
+        "auction_????????": "集合竞价阶段的股票行情和竞价指标。 按交易日分表。",
+        "anomaly_????????": "盘中异动事件和相关指标。 按交易日分表。",
+        "hot_????????": "实时热度排名及热门股票信息。 按交易日分表。"
+      }
+    },
+    "neo4j": {
+      "tables": {
+        "ImportRun": "分析文档导入Neo4j的批次、日期、状态及完成记录。",
+        "SourceDocument": "涨停日报来源文件、路径和哈希节点。",
+        "Stock": "跨日期复用的个股节点。",
+        "Topic": "跨日期复用的题材节点。",
+        "TopicDate": "承接某日题材催化及个股关系的题材日期节点。",
+        "TradeDate": "涨停归因覆盖的交易日期节点。",
+        "关系 · ABOUT_TOPIC": "将题材日期节点关联到对应的题材。",
+        "关系 · ATTRIBUTES_LIMITUP": "题材日期到个股的归因关系，保存涨停原因等分析。",
+        "关系 · FOR_DATE": "将题材日期节点关联到对应的交易日。",
+        "关系 · FROM_SOURCE": "归因内容与来源文档的溯源关系。",
+        "关系 · HAS_DAILY_SNAPSHOT": "题材到某日题材快照的关系，保存当日催化与题材概览。"
+      }
+    },
+    "redis-cache": {
+      "tables": {
+        "key_value_cache": "页面行情、图表及天梯接口的版本化缓存，随源数据版本刷新。"
+      }
+    },
+    "redis-online": {
+      "tables": {
+        "snapshot": "全市场个股实时行情快照，含价格、涨幅及成交信息。",
+        "snapshot_index": "核心指数实时行情快照，含点位、涨幅及成交额。",
+        "limitperformance": "开盘啦实时涨停表现与题材分类快照。",
+        "zt": "实时涨停股票池及封板相关指标。",
+        "break": "实时触及涨停后开板的股票池及破板信息。",
+        "watchlist": "盘前由近期涨停等来源生成的实时监控观察名单及来源，不是用户自选分组表。",
+        "minute": "在线分钟行情及其增量记录。",
+        "orderbook": "实时盘口买卖档位及委托数据。",
+        "auction": "集合竞价阶段的股票行情和竞价指标。",
+        "anomaly": "盘中异动事件和相关指标。",
+        "hot": "实时热度排名及热门股票信息。"
+      }
+    }
+  }
+}

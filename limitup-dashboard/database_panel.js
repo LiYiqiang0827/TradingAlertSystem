@@ -39,12 +39,12 @@
     message.textContent = last ? `${last.table}：${last.message}${last.finishedAt ? ' · '+time(last.finishedAt) : ''}` : '';
     if(data.notice)message.textContent=data.notice;
     message.classList.toggle('error', last?.state === 'failed' || !!data.busy);
-    body.innerHTML = `<table class="database-table"><thead><tr><th>数据表名称</th><th>最新日期或时间</th><th>更新</th></tr></thead><tbody>${data.tables.map(row => {
+    body.innerHTML = `<table class="database-table"><thead><tr><th>数据表名称</th><th>内容简介</th><th>最新日期或时间</th><th>更新</th></tr></thead><tbody>${data.tables.map(row => {
       const job = jobs.slice().reverse().find(j => j.table===row.name && running(j));
       const busy = job || pending.has(data.id+':'+row.name);
       const checkpoints = (row.checkpoints||[]).map(p => `${p.key}：${time(p.date)} · ${time(p.updatedAt)}`).join('\n');
       const title = [row.source, row.updatedAt ? '记录更新：'+time(row.updatedAt) : '', checkpoints].filter(Boolean).join('\n');
-      return `<tr><td title="${esc(title)}"><span>${esc(row.name)}</span></td><td title="${esc(title)}" class="${row.latest?'':'database-unknown'}">${esc(time(row.latest))}</td><td><button type="button" data-db-update="${esc(row.name)}" ${!row.canUpdate || busy || inProgress || data.busy ? 'disabled' : ''} title="${esc(row.updateReason || row.source)}">${busy?'更新中…':'更新'}</button></td></tr>`;
+      return `<tr><td title="${esc(title)}"><span>${esc(row.name)}</span></td><td class="database-description">${esc(row.description || '待补充说明')}</td><td title="${esc(title)}" class="${row.latest?'':'database-unknown'}">${esc(time(row.latest))}</td><td><button type="button" data-db-update="${esc(row.name)}" ${!row.canUpdate || busy || inProgress || data.busy ? 'disabled' : ''} title="${esc(row.updateReason || row.source)}">${busy?'更新中…':'更新'}</button></td></tr>`;
     }).join('')}</tbody></table><p class="database-foot">只读取控制表或更新日志；未记录表示没有独立断点。鼠标停留可查看记录来源。</p>`;
   }
   function schedule(data) {

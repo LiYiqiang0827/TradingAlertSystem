@@ -4,6 +4,7 @@ from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
 import datetime as dt
+import fnmatch
 import json
 import os
 from pathlib import Path
@@ -62,6 +63,15 @@ class DatabaseStatus:
         self.lock=threading.RLock()
         self.cache=OrderedDict()
         self.jobs=OrderedDict()
+        self.process_snapshot=(0,[])
+        self.description_path=self.r.DBROOT/'database_table_descriptions.json'
+        self.description_cache=None
+        if self.r.DBROOT.is_dir() and not self.description_path.exists():
+            template=self.r.WEBROOT/'database_table_descriptions.example.json'
+            try:
+                content=template.read_text(encoding='utf-8')
+                with self.description_path.open('x',encoding='utf-8') as output:output.write(content)
+            except (OSError,UnicodeError):pass
         self.pool=ThreadPoolExecutor(max_workers=1,thread_name_prefix='database-update')
         self.logs=Path.home()/'Library/Logs/TradingAlertSystem/database-updates'
         if self.logs.is_dir():
@@ -109,8 +119,59 @@ class DatabaseStatus:
         if not found:raise ValueError('该数据库不在实际使用的库清单内')
         return found
 
+    def descriptions(self):
+        try:
+            stat=self.description_path.stat()
+            version=(stat.st_mtime_ns,stat.st_size)
+            with self.lock:
+                if self.description_cache and self.description_cache[0]==version:return self.description_cache[1],None
+                data=json.loads(self.description_path.read_text(encoding='utf-8'))
+                if not isinstance(data,dict) or not isinstance(data.get('databases'),dict):raise ValueError('invalid description structure')
+                self.description_cache=(version,data)
+                return data,None
+        except (OSError,UnicodeError,ValueError):return {},'内容简介文件缺失或格式无效，请检查 database_table_descriptions.json'
+
     def detail(self,identity,force=False):
+        result=self._detail(identity,force)
+        descriptions,error=self.descriptions()
+        family='online' if identity.startswith('online-') else identity
+        spec=descriptions.get('databases',{}).get(family,{})
+        tables=spec.get('tables',{}) if isinstance(spec,dict) else {}
+        patterns=spec.get('patterns',{}) if isinstance(spec,dict) else {}
+        if not isinstance(tables,dict):tables={}
+        if not isinstance(patterns,dict):patterns={}
+        rows=[]
+        for row in result['tables']:
+            text=tables.get(row['name'])
+            if not isinstance(text,str):text=next((value for pattern,value in patterns.items() if isinstance(value,str) and fnmatch.fnmatchcase(row['name'],pattern)),None)
+            rows.append({**row,'description':text or '待补充说明'})
+        payload={**result,'tables':rows,'descriptionFile':self.description_path.name}
+        if error:payload['notice']='；'.join(filter(None,(payload.get('notice'),error)))
+        return payload
+
+    def collector_running(self,identity):
+        names={'one-minute':('oneMinute',),'fifteen-minute':('fifteenMinute',),
+               'theme':('theme_graph',),'major-news':('news_events','daily_major_news_analysis')}.get(identity)
+        if not names:return False
+        with self.lock:
+            at,commands=self.process_snapshot
+            if time.monotonic()-at>.5:
+                commands=subprocess.check_output(['ps','-axo','command='],text=True).splitlines()
+                self.process_snapshot=(time.monotonic(),commands)
+        modules={'service.service_'+name for name in names}
+        scripts={'service_'+name+'.py' for name in names}
+        return any(modules.intersection(line.split()) or any(Path(part).name in scripts for part in line.split()) for line in commands)
+
+    def busy_result(self,identity):
+        with self.lock:
+            previous=next((entry[1] for entry in reversed(self.cache.values()) if entry[1]['id']==identity),None)
+        notice='数据库正在写入，暂时无法读取控制表'
+        if previous:return {**previous,'busy':True,'notice':notice+'；显示上次读取的记录','jobs':self.job_list(identity)}
+        raise DatabaseBusy(notice+'，请稍后刷新状态')
+
+    def _detail(self,identity,force=False):
         spec=self.spec(identity)
+        if self.collector_running(identity):return self.busy_result(identity)
         revision=self.r.database_revision((self.r.DBROOT/spec['path'],Path(str(self.r.DBROOT/spec['path'])+'.wal'))) if spec['engine'] in ('sqlite','duckdb') else identity
         key=identity+':'+revision
         with self.lock:
@@ -125,11 +186,7 @@ class DatabaseStatus:
             else:rows=[self.row('key_value_cache',None,'缓存没有独立更新时间控制表',None,'按源数据版本自动刷新')]
         except Exception as exc:
             if 'lock' not in str(exc).lower():raise
-            with self.lock:
-                previous=next((entry[1] for entry in reversed(self.cache.values()) if entry[1]['id']==identity),None)
-            notice='数据库正在写入，暂时无法读取控制表'
-            if previous:return {**previous,'busy':True,'notice':notice+'；显示上次读取的记录','jobs':self.job_list(identity)}
-            raise DatabaseBusy(notice+'，请稍后刷新状态') from None
+            return self.busy_result(identity)
         result={**spec,'tables':rows,'checkedAt':stamp(),'source':'ctrl/checkpoints'}
         with self.lock:
             self.cache[key]=(time.monotonic(),result)

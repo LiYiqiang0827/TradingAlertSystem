@@ -438,8 +438,19 @@ DuckDB被采集进程占用时返回明确的写入中状态；若已有成功�
 模型分析和历史只读回退库不提供通用采集按钮，禁用按钮可悬停查看原因。
 日志保存在 `~/Library/Logs/TradingAlertSystem/database-updates/`，凭据和日志正文不返回页面。
 
-配套 TradeDataManager 版本：[ac32a68](https://github.com/LiYiqiang0827/TradeDataManager/commit/ac32a68)。
+配套 TradeDataManager 版本：[c3d7bc7](https://github.com/LiYiqiang0827/TradeDataManager/commit/c3d7bc7)。
 需要 `offlineDataManager/scripts/core/minute_control.py`：正式一分钟 catalog 内
 `tbl_one_minute_ctrl`、15分钟 DuckDB 内 `tbl_fifteen_minute_ctrl`。旧库先运行
 `cd ~/TradingDataManager/offlineDataManager/scripts && ../../.venv/bin/python -m core.minute_control`
 初始化，之后正常每日更新自动维护。Ctrl 的最大日期不代表全市场完整性审计。
+
+### 数据表内容简介
+
+表名后的“内容简介”来自正式数据根目录 `database_table_descriptions.json`。
+仓库提供 `database_table_descriptions.example.json`；首次启动时，仅在目标文件不存在且数据根目录已存在时初始化，
+不覆盖用户维护的现有说明。编辑该JSON后“刷新状态”即可生效，无需重启服务。
+结构为 `databases.<database-id>.tables.<table-name>`；在线月库共用 `online` 分类，
+其 `patterns` 通过通配符匹配每日分表。未知新表显示“待补充说明”，无效JSON会显示错误提示。
+
+分钟库状态读取检测采集进程并避让写入；正式分钟写入遇到短暂DuckDB文件锁会等待重试最多30秒，
+避免一个短暂的状态查询使下载任务中断。
