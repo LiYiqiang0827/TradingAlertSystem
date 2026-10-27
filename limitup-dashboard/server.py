@@ -1136,7 +1136,7 @@ def stock_preview(code,date,show_latest=False,fifteen_future_days=15):
                 following=[str(row[0]) for row in c.execute(
                     "SELECT cal_date FROM tbl_cn_tradecal WHERE exchange='SSE' AND is_open=1 AND cal_date>? AND cal_date<=? ORDER BY cal_date LIMIT 15",(date,today))]
             one_end=following[min(5,len(following))-1] if following else date
-            fifteen_end=following[min(fifteen_future_days,len(following))-1] if following else date
+            fifteen_end=today if fifteen_future_days==0 else following[min(fifteen_future_days,len(following))-1] if following else date
         basis_future=_chart_read_pool.submit(stock_series_latest,code,today,True,date)
         base=latest_anchor(BASIC_DB,code,today)[1]
         basis_tag=f"{today}:{base}:{version['stockDataVersion']}"
@@ -2826,7 +2826,7 @@ class Handler(SimpleHTTPRequestHandler):
                 code=q.get('code',[''])[0];date=safe_date(q.get('date',[''])[0])
                 if not re.fullmatch(r'\d{6}\.(SH|SZ|BJ)',code):raise ValueError('股票代码无效')
                 future_days=int(q.get('fifteenFutureDays',['15'])[0])
-                if future_days not in (5,15):return self.send_json({'error':'分钟窗口参数无效'},400)
+                if future_days not in (0,5,15):return self.send_json({'error':'分钟窗口参数无效'},400)
                 payload,hit=stock_preview(code,date,show_latest=q.get('showLatest',['0'])[0]=='1',fifteen_future_days=future_days)
                 return self.send_json(payload,headers={'X-Chart-Cache':'process-memory' if hit else 'source-load'})
             if u.path=="/api/stock-daily-preload":
