@@ -205,11 +205,21 @@ class LiveStockMonitor:
                 'offset': offset, 'nextOffset': offset+len(page), 'hasMore': offset+len(page)<len(payload['items']),
                 'items': [{**item, **facts.get(item['code'], {})} for item in page]}
 
-    def _chart(self, code, day):
+    def _chart(self, code, day, period='all'):
         r = self.r
         version = r.stock_data_version()['stockDataVersion']
         today = dt.datetime.now(ZONE).strftime('%Y%m%d')
+        one_only = period == 'oneMin'
         def historical():
+            if one_only:
+                # Same-day minute thumbnails only need the raw previous close.
+                # Do not load adjusted daily history or 15-minute data for hidden charts.
+                with closing(sqlite3.connect(f'file:{r.BASIC_DB}?mode=ro',uri=True,timeout=3)) as c:
+                    row=c.execute('SELECT trade_date,open,high,low,close,vol FROM tbl_cn_day WHERE ts_code=? AND trade_date<? ORDER BY trade_date DESC LIMIT 1',(code,day)).fetchone()
+                daily=[]
+                if row:
+                    daily=[{'timestamp':int(dt.datetime.strptime(row[0],'%Y%m%d').replace(tzinfo=dt.timezone.utc).timestamp()*1000),**dict(zip(('open','high','low','close','volume'),row[1:]))}]
+                return {'daily':daily,'fifteenMin':[],'errors':{}}
             basis = r.stock_series_latest(code, today)
             daily = [bar for bar in basis['daily'] if dt.datetime.fromtimestamp(bar['timestamp']/1000, dt.timezone.utc).strftime('%Y%m%d') <= day][-20:]
             start = (dt.datetime.strptime(day, '%Y%m%d')-dt.timedelta(days=12)).strftime('%Y%m%d')
@@ -223,7 +233,7 @@ class LiveStockMonitor:
                 fifteen = []
                 errors['fifteenMin'] = type(exc).__name__
             return {'daily': daily, 'fifteenMin': fifteen, 'errors': errors}
-        history = r.cached_series(f'live-monitor-history-chart:v1:{code}:{day}:{version}', historical, 300)
+        history = r.cached_series(f'live-monitor-history-chart:v2:{period}:{code}:{day}:{version}', historical, 300)
         def load():
             import redis
             client = redis.Redis(port=6380, decode_responses=True, socket_connect_timeout=.5, socket_timeout=2)
@@ -282,8 +292,9 @@ class LiveStockMonitor:
                 daily = rebase(prior)+[{**live['today'], 'volume': live['today']['volume']/100, 'amount': live['today']['turnover']/1000}]
                 midnight = int(start*1000)
                 # Stock volume stays in source shares; index aggregation otherwise prefers turnover.
-                stock_one = [{k:v for k,v in bar.items() if k != 'turnover'} for bar in one]
-                fifteen = rebase([v for v in fifteen if v['timestamp'] < midnight])+r.aggregate_live_bars(stock_one, 'fifteenMin')
+                if not one_only:
+                    stock_one = [{k:v for k,v in bar.items() if k != 'turnover'} for bar in one]
+                    fifteen = rebase([v for v in fifteen if v['timestamp'] < midnight])+r.aggregate_live_bars(stock_one, 'fifteenMin')
             previous = live.get('quote', {}).get('prevClose') if live.get('quote') else None
             if not one and day < today:
                 # Frozen historical sessions use real one-minute bars, never 15-minute substitution.
@@ -308,10 +319,13 @@ class LiveStockMonitor:
                     'sources': {'oneMin': 'tdx_native_1min+redis_tick' if native else 'redis_tick_1min' if ticks else 'offline_native_1min' if one else 'unavailable',
                                 'fifteenMin': 'offline_qfq+live_1min_aggregated_15min' if live['today'] else 'offline_qfq', 'daily': 'offline_qfq+live_tick' if live['today'] else 'offline_qfq'},
                     'updatedAt': live.get('quote', {}).get('time') if live.get('quote') else None}
-        return r.cached_series(f'live-monitor-chart:v1:{code}:{day}:{version}', load, 5 if day == today else 300)
+        payload=r.cached_series(f'live-monitor-chart:v2:{period}:{code}:{day}:{version}', load, 5 if day == today else 300)
+        return {key:value for key,value in payload.items() if key not in ('fifteenMin','daily')} if one_only else payload
 
-    def charts(self, codes, day):
-        futures = {code: self.pool.submit(self._chart, code, day) for code in codes}
+    def charts(self, codes, day, period='all'):
+        if period not in ('all','oneMin'):
+            raise ValueError('监测缩略图周期无效')
+        futures = {code: self.pool.submit(self._chart, code, day, period) for code in codes}
         items, errors = {}, {}
         for code, future in futures.items():
             try:

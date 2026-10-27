@@ -2515,7 +2515,7 @@ class Handler(SimpleHTTPRequestHandler):
                 return self.send_json({'date':day,'items':LIVE_STOCK_MONITOR.facts(codes,day,hydrate=True)})
             if u.path=='/api/live-monitor-charts':
                 day=safe_date(q.get('date',[''])[0]);codes=LIVE_STOCK_MONITOR.codes(q.get('codes',[''])[0],3)
-                return self.send_json(LIVE_STOCK_MONITOR.charts(codes,day))
+                return self.send_json(LIVE_STOCK_MONITOR.charts(codes,day,q.get('period',['all'])[0]))
             if u.path=='/api/live-events':return self.live_events()
             if u.path=='/api/live-push-status':return self.send_json(PUSH_HUB.status())
             if u.path=="/api/ladder-live-status":
