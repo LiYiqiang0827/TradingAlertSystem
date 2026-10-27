@@ -35,7 +35,7 @@ class LimitupTracking:
         live = live if live.get('available') and live.get('date') == day else {}
         revision = r.database_revision((r.BASIC_DB, r.KPL_DB, r.DBROOT/'offline/limitup_ladder.db'))
         signature = live.get('revision', '')
-        return r.cached_series(f'limitup-tracking:v6:{day}:{revision}:{signature}',
+        return r.cached_series(f'limitup-tracking:v7:{day}:{revision}:{signature}',
                                lambda:self._calculate(day, dates, live, revision), 10 if live else 300)
 
     def _events(self, dates, live):
@@ -148,10 +148,9 @@ class LimitupTracking:
             if event['date'] in (day, previous_day):
                 if sealed and current_run>=2:groups['continuous'].append(code)
                 if not sealed and code not in halted and event['date']==previous_day and board>=2:groups['fresh_break'].append(code)
-                # A return event can itself be a multi-day/multi-board pattern.
-                # Consecutive sessions belong to continuous, never to relimit buckets.
+                # 再次涨停仅统计所选当日的首板；昨日事件和几天几板不进入此分组。
                 before = history[-2] if len(history)>1 else None
-                if before and index.get(event['date'],0)-index.get(before['date'],0)>1 and current_run<=1:
+                if sealed and board==1 and current_run==1 and before and index.get(event['date'],0)-index.get(before['date'],0)>1:
                     gap = index[event['date']]-index[before['date']]-1
                     key = 'return5' if gap<=5 else 'return10' if gap<=10 else 'return20' if gap<=20 else 'return30' if gap<=30 else None
                     if key:
