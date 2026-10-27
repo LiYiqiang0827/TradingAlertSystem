@@ -1,6 +1,6 @@
 # TradingAlert 涨停研究台
 
-与 `offlineAlertSystem/` 同级的本地 HTML 原型，默认只读访问 Mac mini 上 TradingDataManager / TradingDataBase 的现有数据。
+与 `offlineAlertSystem/` 同级的本地 HTML 原型，行情只读访问 Mac mini 上 TradingDataManager / TradingDataBase 的现有数据；自选分组单独持久保存。
 
 ## 主导航（导航改版后）
 
@@ -362,3 +362,22 @@ cd ~/TradingAlertSystem/limitup-dashboard
 本次对照近期、跨半年、2018 年历史日期、停牌、周期内除权和未更新尾部，
 核对各周期 OHLCV/成交额及历史截断；并发 12 个完整页/预览请求后缓存锁全部释放。
 模拟 WAL 写事务持有时，独立只读连接仍能读取提交前的正确行情。
+
+## 自选分组（2026-10-27）
+
+天梯画布、左侧展开股票列表、题材/日期悬浮表、个股悬浮框共用姓名后的方框按钮：
+未分组显示 `+`，已有任意分组显示 `自`。菜单勾选支持多分组，取消所有勾选即移出自选；
+底部“新建分组”弹窗会创建分组并把当前股票加入。分组归属按股票代码保存，不受复盘日期影响。
+
+- 持久库：`$TRADING_DATABASE_ROOT/offline/watchlists.db`，由 `coreClient.watchlist.WatchlistStore` 管理。
+- Redis：沿用行情缓存 Redis DB 2，启动时预加载完整分组快照；正常查询读取 Redis。
+- SQLite 提交成功后同步 Redis，Redis 未命中或不可用时从持久库恢复，错误结果不替代已有数据。
+- 表：`watchlist_group`、`watchlist_stock`、`watchlist_member`、`watchlist_meta`。同一股票可属于多个分组。
+- 并发修改按股票版本检查；其他页面已经修改时返回 409 并刷新菜单，避免旧勾选覆盖新结果。
+- 浏览器仅保留当前界面状态；跨标签页通过 BroadcastChannel 通知刷新，打开菜单/回到窗口时也会读最新分组。
+- `GET /api/watchlists` 读快照；`POST /api/watchlists/groups` 新建并可加入当前股票；
+  `POST /api/watchlists/stocks` 更新该股的分组集合。写接口仅接受同源 JSON 请求。
+
+请同时更新 TradingDataManager 至 `f73eed2` 或更新的 main（[coreClient/watchlist.py](https://github.com/LiYiqiang0827/TradeDataManager/blob/f73eed2/coreClient/watchlist.py)，旧 `theme-graph-chain-v1` 标签不包含本功能）。
+无需新增凭据；Redis 连接沿用网页现有配置。`TRADING_WATCHLIST_DB` 可覆盖自选库位置，
+用于隔离示例/验证库；默认仍在正式 offline 目录。不要把生成的 SQLite 数据库提交到 Git。

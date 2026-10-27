@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Local read-only API for the TradingAlert limit-up dashboard prototype."""
+"""Local market API and persistent watchlists for the TradingAlert dashboard."""
 from __future__ import annotations
 import copy, json, os, re, sqlite3, sys, datetime, traceback, calendar, bisect, math, hashlib, threading, gzip
 from functools import lru_cache
@@ -27,6 +27,19 @@ from limitup_ladder.calculator import (LadderCalculator, is_closed_limit_up, con
 from limitup_ladder.live import overlay_live
 
 _chart_read_pool=ThreadPoolExecutor(max_workers=6,thread_name_prefix="stock-chart-read")
+
+from coreClient.watchlist import WatchlistStore, WatchlistConflict
+WATCHLISTS=None
+_watchlists_init_lock=threading.Lock()
+
+def watchlists_store():
+    global WATCHLISTS
+    if WATCHLISTS is None:
+        with _watchlists_init_lock:
+            if WATCHLISTS is None:
+                WATCHLISTS=WatchlistStore(os.environ.get("TRADING_WATCHLIST_DB",str(DBROOT/"offline"/"watchlists.db")),redis_client=CACHE.redis)
+                WATCHLISTS.refresh()
+    return WATCHLISTS
 
 LADDER_STORE=LimitupLadderStore()
 _ladder_dates_snapshot=None
@@ -2456,7 +2469,8 @@ class Handler(SimpleHTTPRequestHandler):
         if compressed: body=gzip.compress(body,compresslevel=1,mtime=0)
         self.send_response(status)
         self.send_header("Content-Type","application/json; charset=utf-8")
-        self.send_header("Access-Control-Allow-Origin","*")
+        if not urlparse(self.path).path.startswith("/api/watchlists"):
+            self.send_header("Access-Control-Allow-Origin","*")
         self.send_header("Vary","Accept-Encoding")
         self.send_header("Cache-Control","no-store")
         for key,value in (headers or {}).items():self.send_header(key,value)
@@ -2485,6 +2499,7 @@ class Handler(SimpleHTTPRequestHandler):
     def do_GET(self):
         u=urlparse(self.path); q=parse_qs(u.query)
         try:
+            if u.path=='/api/watchlists':return self.send_json(watchlists_store().snapshot())
             if u.path=='/api/live-events':return self.live_events()
             if u.path=='/api/live-push-status':return self.send_json(PUSH_HUB.status())
             if u.path=="/api/ladder-live-status":
@@ -2850,6 +2865,22 @@ class Handler(SimpleHTTPRequestHandler):
     def do_POST(self):
         try:
             u=urlparse(self.path)
+            if u.path in ("/api/watchlists/groups","/api/watchlists/stocks"):
+                origin=self.headers.get("Origin")
+                if (origin and urlparse(origin).netloc!=self.headers.get("Host")) or self.headers.get("Sec-Fetch-Site")=="cross-site":
+                    return self.send_json({"error":"请求来源无效"},403)
+                if self.headers.get("Content-Type","").split(";",1)[0].strip().lower()!="application/json":
+                    return self.send_json({"error":"请使用JSON请求"},415)
+                size=int(self.headers.get("Content-Length","0"))
+                if not 0<size<=100_000:return self.send_json({"error":"请求内容无效"},413)
+                body=json.loads(self.rfile.read(size))
+                if not isinstance(body,dict):raise ValueError("请求内容无效")
+                store=watchlists_store()
+                try:
+                    payload=(store.create_group(body.get("name"),body.get("stock")) if u.path.endswith("/groups")
+                             else store.set_groups(body.get("code"),body.get("name"),body.get("groupIds"),body.get("expectedVersion")))
+                except WatchlistConflict as exc:return self.send_json({**store.snapshot(),"error":str(exc)},409)
+                return self.send_json(payload)
             if u.path!="/api/analyze": return self.send_error(404)
             size=int(self.headers.get("Content-Length","0"))
             if size>100_000: return self.send_json({"error":"选中文字过长"},413)
@@ -2866,9 +2897,10 @@ class Handler(SimpleHTTPRequestHandler):
 
 if __name__=="__main__":
     CACHE=Cache()
+    watchlists_store()
     start_daily_warmer()
     from live_push import LivePushHub
     PUSH_HUB=LivePushHub(live_push_event);PUSH_HUB.start()
     port=int(os.environ.get("TRADINGALERT_PORT","8765")); host=os.environ.get("TRADINGALERT_HOST","127.0.0.1")
-    print(f"TradingAlert dashboard on http://{host}:{port} (read-only)",flush=True)
+    print(f"TradingAlert dashboard on http://{host}:{port} (market data read-only; watchlists writable)",flush=True)
     ThreadingHTTPServer((host,port),Handler).serve_forever()
