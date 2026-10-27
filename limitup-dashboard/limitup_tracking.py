@@ -22,6 +22,24 @@ def number(value):
     except (ValueError, TypeError):return None
 
 
+def pullback_candle(bar):
+    """长下影或小十字星；幅度以同一复权基准的昨收为分母。"""
+    previous = bar.get('previous')
+    if not previous or previous <= 0:return False
+    op, high, low, close = (bar[k] for k in ('open','high','low','close'))
+    shadow = (min(op, close) - low) / previous
+    body = abs(close - op) / previous
+    span = (high - low) / previous
+    return shadow >= .03 or (body <= .01 and span <= .03)
+
+
+def rising_average(bars, period):
+    """最新均线相对前一日连续上涨3次，需要period+3根有效日线。"""
+    if len(bars) < period + 3:return False
+    closes = [bar['close'] for bar in bars[-(period+3):]]
+    return all(closes[i+period] > closes[i] for i in range(3))
+
+
 class LimitupTracking:
     def __init__(self, runtime):self.r = runtime
 
@@ -35,7 +53,7 @@ class LimitupTracking:
         live = live if live.get('available') and live.get('date') == day else {}
         revision = r.database_revision((r.BASIC_DB, r.KPL_DB, r.DBROOT/'offline/limitup_ladder.db'))
         signature = live.get('revision', '')
-        return r.cached_series(f'limitup-tracking:v7:{day}:{revision}:{signature}',
+        return r.cached_series(f'limitup-tracking:v8:{day}:{revision}:{signature}',
                                lambda:self._calculate(day, dates, live, revision), 10 if live else 300)
 
     def _events(self, dates, live):
@@ -160,6 +178,7 @@ class LimitupTracking:
             if not current:
                 missing.append(code)
                 continue
+            if not pullback_candle(current):continue
             # Use the exchange's current daily range, never a carried-forward close.
             for period in (5,10,20,30,60):
                 if len(bars)<period:continue
@@ -171,7 +190,10 @@ class LimitupTracking:
             # Exclusive first match in the same order as the table's columns.
             for key, _ in BOTTOM:
                 target = member['signals'].get(key)
-                if target is not None and current['low']<=target<=current['high']:
+                period = int(key[2:]) if key.startswith('ma') else 0
+                if (target is not None and current['low']<=target<=current['high']
+                        and current['close']>target
+                        and (period in (0,5) or rising_average(bars,period))):
                     groups[key].append(code)
                     break
         used = set(code for values in groups.values() for code in values)
@@ -183,7 +205,7 @@ class LimitupTracking:
                 'stocks':{code:stocks[code] for code in used}, 'screenedCount':len(codes), 'missingDailyCount':len(missing),
                 'source':'online+offline' if live else 'offline', 'updatedAt':live.get('updatedAt'),
                 'dataVersion':revision, **self.r.stock_data_version(), 'calculationMs':round((time.perf_counter()-began)*1000,1),
-                'rules':{'pullbackPriority':[key for key,_ in BOTTOM], 'pullbackExclusive':True, 'touch':'low <= target <= high', 'relimitGap':'intervening exchange sessions, buckets 1-5/6-10/11-20/21-30', 'origin':'multi-board first limit close; single-board preceding close'}}
+                'rules':{'pullbackPriority':[key for key,_ in BOTTOM], 'pullbackExclusive':True, 'touch':'low <= target <= high and close > target', 'candle':'lower shadow >= 3% of previous close or body <= 1% and range <= 3%', 'risingMA':'MA10/20/30/60 rise on each of last 3 sessions', 'relimitGap':'intervening exchange sessions, buckets 1-5/6-10/11-20/21-30', 'origin':'multi-board first limit close; single-board preceding close'}}
 
     def _short_events(self, dates, live):
         payload = self.r.limitup_ladder_data(dates[-1], min(62,len(dates)), live or None)
