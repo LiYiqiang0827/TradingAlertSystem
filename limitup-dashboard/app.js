@@ -485,7 +485,7 @@
   }
 
   function routeUrl(route){const params=new URLSearchParams();params.set('date',route.date);if(route.view&&route.view!=='home')params.set('view',route.view);if(route.topic)params.set('topic',route.topic);if(route.stock)params.set('stock',route.stock);if(route.index)params.set('index',route.index);if(route.outcome)params.set('outcome',route.outcome);if(route.view==='ladder'&&route.ladderEnd)params.set('ladderEnd',route.ladderEnd);return `${location.pathname}?${params.toString()}`;}
-  function syncBrowserRoute(view='home',date=state.date,topic='',stock='',mode='push',outcome='',index='',ladderEnd=''){closeLadderStockHover();closeIndexHover();const previous=history.state,parent=mode==='push'&&previous?.tradingAlert,ladderReturn=['home','topic','stock','index'].includes(view)?(previous?.view==='ladder'?captureLadderReturn():previous?.ladderReturn||null):null;const route={tradingAlert:true,view,date,topic,stock,index,outcome,ladderEnd,ladderReturn,indexCutoff:view==='index'&&(['ladder','indices'].includes(previous?.view)||Boolean(previous?.indexCutoff)),hasAppParent:Boolean(parent)};const url=routeUrl(route);if(mode==='push'&&history.state?.tradingAlert&&routeUrl(history.state)===url)return route;history[`${mode}State`](route,'',url);return route;}
+  function syncBrowserRoute(view='home',date=state.date,topic='',stock='',mode='push',outcome='',index='',ladderEnd=''){closeLadderStockHover(true);closeIndexHover(true);const previous=history.state,parent=mode==='push'&&previous?.tradingAlert,ladderReturn=['home','topic','stock','index'].includes(view)?(previous?.view==='ladder'?captureLadderReturn():previous?.ladderReturn||null):null;const route={tradingAlert:true,view,date,topic,stock,index,outcome,ladderEnd,ladderReturn,indexCutoff:view==='index'&&(['ladder','indices'].includes(previous?.view)||Boolean(previous?.indexCutoff)),hasAppParent:Boolean(parent)};const url=routeUrl(route);if(mode==='push'&&history.state?.tradingAlert&&routeUrl(history.state)===url)return route;history[`${mode}State`](route,'',url);return route;}
   function routeFromLocation(){if(history.state?.tradingAlert)return history.state;const params=new URLSearchParams(location.search),date=params.get('date')||'',view=params.get('view')||'home';return {tradingAlert:true,date,view,topic:params.get('topic')||'',stock:params.get('stock')||'',index:params.get('index')||'',outcome:params.get('outcome')||'',ladderEnd:params.get('ladderEnd')||params.get('ladderStart')||''};}
   function captureLadderReturn(){
     const view=ladderView,chart=$('#ladderChart');if(!chart&&view?.returnSnapshot)return view.returnSnapshot;
@@ -1034,7 +1034,7 @@
       for(const key of ladderDateDetailCache.keys())if(key.startsWith(status.date+':'))ladderDateDetailCache.delete(key);
       for(const key of ladderTopicDetailCache.keys())if(key.startsWith(status.date+':'))ladderTopicDetailCache.delete(key);
       // mergeLadderPayload already seeded the new live legend; keep it visible during updates.
-      if(ladderStockHover&&!ladderStockHover.card.hidden||ladderTopicHover&&!ladderTopicHover.card.hidden||indexHover&&!indexHover.card.hidden){view.pendingPaint=true;updateLiveLadderLabel(view);return;}
+      if(ladderStockHover&&!ladderStockHover.card.hidden&&!ladderStockHover.pinned||ladderTopicHover&&!ladderTopicHover.card.hidden||indexHover&&!indexHover.card.hidden&&!indexHover.pinned){view.pendingPaint=true;updateLiveLadderLabel(view);return;}
       closeLadderTopicHover();rebuildVerticalLadder(view);updateLiveLadderLabel(view);
     }catch(error){if(ladderView===view)updateLiveLadderLabel(view,'实时更新失败，保留上一快照');console.warn('实时天梯更新失败',error);}finally{view.liveLoading=false;}
   }
@@ -1234,7 +1234,7 @@
   const ladderStockPreviewSelector='#ladderLegend .vl-legend-stock-name[data-vl-stock-preview],#ladderChart [data-vl-stock-link],#ladderChart [data-vl-unpromoted-link],#ladderChart [data-vl-broken-link],#ladderTopicHover [data-vl-stock-preview],#ladderNestedThemeHover [data-vl-stock-preview],#limitupTrackingContent [data-tracking-stock-preview]';
   function flushPendingLiveLadder(){
     const view=ladderView;if(!view?.live||!view.pendingPaint)return;
-    requestAnimationFrame(()=>{if(ladderView===view&&view.pendingPaint&&!view.dragging&&history.state?.view==='ladder'&&(!ladderStockHover||ladderStockHover.card.hidden)&&(!ladderTopicHover||ladderTopicHover.card.hidden)&&(!indexHover||indexHover.card.hidden))rebuildVerticalLadder(view);});
+    requestAnimationFrame(()=>{if(ladderView===view&&view.pendingPaint&&!view.dragging&&history.state?.view==='ladder'&&(!ladderStockHover||ladderStockHover.card.hidden||ladderStockHover.pinned)&&(!ladderTopicHover||ladderTopicHover.card.hidden)&&(!indexHover||indexHover.card.hidden||indexHover.pinned))rebuildVerticalLadder(view);});
   }
   function scheduleLiveHoverRefresh(hover,refresh){
     clearTimeout(hover.liveTimer);hover.liveRefresh=hover.card.dataset.date===shanghaiDateKey()?refresh:null;
@@ -1307,11 +1307,48 @@
     delete hover.card.dataset.refreshError;hover.card.title='';hover.card.dataset.updatedAt=payload.updatedAt||new Date().toISOString();hover.card.dataset.refreshCount=String(Number(hover.card.dataset.refreshCount||0)+1);
     return series;
   }
-  function closeLadderStockHover(){if(Watchlists.isOpen)return;
-    const hover=ladderStockHover;if(!hover)return;clearTimeout(hover.showTimer);clearTimeout(hover.hideTimer);clearTimeout(hover.liveTimer);hover.liveRefresh=null;hover.liveRefreshPending=false;hover.requestId++;hover.anchor=null;hover.resizeObserver?.disconnect();hover.resizeObserver=null;
+  function previewControls(hover){
+    const pinned=Boolean(hover?.pinned);
+    return `<button type="button" class="preview-pin" data-preview-pin aria-pressed="${pinned}" aria-label="${pinned?'取消固定悬浮窗':'固定悬浮窗'}" title="${pinned?'取消固定':'固定悬浮窗'}"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M6 2h8l-1 5 2 3v1h-4v6l-1 2-1-2v-6H5v-1l2-3z"/></svg></button><button type="button" class="preview-close" data-preview-close aria-label="关闭悬浮窗" title="关闭">×</button>`;
+  }
+  function installPreviewControls(hover,close){
+    const card=hover.card;
+    card.addEventListener('click',event=>{
+      const pin=event.target.closest('[data-preview-pin]'),dismiss=event.target.closest('[data-preview-close]');
+      if(dismiss){event.preventDefault();event.stopPropagation();close(true);return;}
+      if(!pin)return;event.preventDefault();event.stopPropagation();clearTimeout(hover.hideTimer);clearTimeout(hover.showTimer);
+      hover.pinned=!hover.pinned;card.classList.toggle('is-pinned',hover.pinned);if(hover.pinned){clampPinnedPreview(card);flushPendingLiveLadder();flushPendingTrackingHover();}pin.setAttribute('aria-pressed',String(hover.pinned));
+      pin.setAttribute('aria-label',hover.pinned?'取消固定悬浮窗':'固定悬浮窗');pin.title=hover.pinned?'取消固定':'固定悬浮窗';
+    });
+    card.addEventListener('pointerdown',event=>{
+      if(!hover.pinned||event.button!==0||!event.target.closest('.vl-stock-preview-head')||event.target.closest('button,a,input,select,textarea'))return;
+      const box=card.getBoundingClientRect();hover.drag={id:event.pointerId,x:event.clientX,y:event.clientY,left:box.left,top:box.top};
+      card.setPointerCapture(event.pointerId);card.classList.add('is-dragging');event.preventDefault();
+    });
+    card.addEventListener('pointermove',event=>{
+      const drag=hover.drag;if(!drag||drag.id!==event.pointerId)return;
+      const zoom=parseFloat(getComputedStyle(document.documentElement).zoom)||1,box=card.getBoundingClientRect(),margin=8;
+      const x=Math.max(margin,Math.min(window.innerWidth-box.width-margin,drag.left+event.clientX-drag.x));
+      const y=Math.max(margin,Math.min(window.innerHeight-box.height-margin,drag.top+event.clientY-drag.y));
+      card.style.left=x/zoom+'px';card.style.top=y/zoom+'px';
+    });
+    const end=event=>{if(hover.drag?.id!==event.pointerId)return;hover.drag=null;card.classList.remove('is-dragging');if(card.hasPointerCapture(event.pointerId))card.releasePointerCapture(event.pointerId);};
+    card.addEventListener('pointerup',end);card.addEventListener('pointercancel',end);
+  }
+  function closeLadderStockHover(force=false){if(Watchlists.isOpen&&force!==true)return;
+    const hover=ladderStockHover;if(!hover||(hover.pinned&&force!==true))return;hover.pinned=false;hover.drag=null;hover.card.classList.remove('is-pinned','is-dragging');clearTimeout(hover.showTimer);clearTimeout(hover.hideTimer);clearTimeout(hover.liveTimer);hover.liveRefresh=null;hover.liveRefreshPending=false;hover.requestId++;hover.anchor=null;hover.resizeObserver?.disconnect();hover.resizeObserver=null;
     parkHoverCharts(hover);hover.card.hidden=true;hover.entries=null;hover.stock=null;hover.chartIds=[];hover.charts=[];hover.lastPayload=null;hover.lastSignature='';hover.cacheKey='';hover.card.replaceChildren();flushPendingLiveLadder();flushPendingTrackingHover();
   }
+  function clampPinnedPreview(card){
+    if(!card.classList.contains('is-pinned'))return;
+    const zoom=parseFloat(getComputedStyle(document.documentElement).zoom)||1,margin=8;
+    card.style.maxHeight=Math.min(680,(window.innerHeight-margin*2)/zoom)+'px';
+    const box=card.getBoundingClientRect();
+    card.style.left=Math.max(margin,Math.min(box.left,window.innerWidth-box.width-margin))/zoom+'px';
+    card.style.top=Math.max(margin,Math.min(box.top,window.innerHeight-box.height-margin))/zoom+'px';
+  }
   function positionLadderStockHover(anchor,card){
+    if(card.classList.contains('is-pinned')&&card.style.left){clampPinnedPreview(card);return;}
     const zoom=parseFloat(getComputedStyle(document.documentElement).zoom)||1,margin=10;
     card.style.width=Math.min(960,(window.innerWidth-margin*2)/zoom)+'px';card.style.maxHeight=Math.min(680,(window.innerHeight-margin*2)/zoom)+'px';
     const box=anchor.getBoundingClientRect(),size=card.getBoundingClientRect(),fitsRight=box.right+margin+size.width<=window.innerWidth-margin,fitsLeft=box.left-margin-size.width>=margin;
@@ -1380,7 +1417,7 @@
     if(data?.isSealed)facts.push(['实时封板资金',compactYuan(data.sealAmount),'pct-up',(data.sealUpdatedAt?'行情时间 '+new Date(data.sealUpdatedAt).toLocaleString('zh-CN',{timeZone:'Asia/Shanghai',hour12:false})+' · ':'')+(data.sealSource==='kpl_zt'?'开盘啦涨停池':'开盘啦 performance')]);
     if(data?.breakTime)facts.push(['破板时间',data.breakTime]);
     if(data?.breakCount!=null)facts.push(['破板次数',String(data.breakCount)]);
-    return `<header class="vl-stock-preview-head">${marketCapBadge(data?.totalMarketCap)}<strong${isLadderGrowthStock(stock.code)?' class="vl-hover-growth-name"':''}>${esc(stock.name)}</strong>${Watchlists.button(stock)}<span>${esc(stock.code)}</span><span>${esc(stock.theme)}</span><span>${esc(label)}</span>${ladderStockPreviewTraits(stock)}<time>${esc(fmtDate(stock.date))}</time></header><div class="vl-stock-preview-facts">${facts.map(([name,value,tone,title])=>`<div${title?` title="${esc(title)}"`:''}><span>${name}</span><b${tone?` class="${tone}"`:''}>${esc(value)}</b></div>`).join('')}</div>`;
+    return `<header class="vl-stock-preview-head">${marketCapBadge(data?.totalMarketCap)}<strong${isLadderGrowthStock(stock.code)?' class="vl-hover-growth-name"':''}>${esc(stock.name)}</strong>${Watchlists.button(stock)}<span>${esc(stock.code)}</span><span>${esc(stock.theme)}</span><span>${esc(label)}</span>${ladderStockPreviewTraits(stock)}<time>${esc(fmtDate(stock.date))}</time>${previewControls(ladderStockHover)}</header><div class="vl-stock-preview-facts">${facts.map(([name,value,tone,title])=>`<div${title?` title="${esc(title)}"`:''}><span>${name}</span><b${tone?` class="${tone}"`:''}>${esc(value)}</b></div>`).join('')}</div>`;
   }
   function ladderStockDailyQuote(stock,payload,bars){
     const bar=bars.find(bar=>chartDayKey(bar)===stock.date)||bars.at(-1),day=bar?chartDayKey(bar):stock.date,data=day===stock.date?payload.previewFacts:null,price=value=>value==null||!Number.isFinite(Number(value))?'—':Number(value).toFixed(2),percent=value=>value==null||!Number.isFinite(Number(value))?'—':(Number(value)>0?'+':'')+Number(value).toFixed(2)+'%',volume=value=>value==null||!Number.isFinite(Number(value))?'—':Number(value)>=1e4?(Number(value)/1e4).toFixed(1)+'万':Math.round(Number(value)).toString();
@@ -1405,21 +1442,21 @@
     return anchor.closest('#limitupTrackingContent')?trackingStockHoverContext:ladderStockHoverContext;
   }
   function stockHoverContextCurrent(context,anchor){
-    if(!context||!anchor.isConnected)return false;
-    if(context.mode==='tracking')return history.state?.view==='tracking'&&trackingStockHoverContext===context&&state.date===context.date;
-    return history.state?.view==='ladder'&&ladderView===context.view&&!context.view.dragging&&context.view.data===context.fullData;
+    if(!context||(!anchor.isConnected&&!ladderStockHover?.pinned))return false;
+    if(context.mode==='tracking')return history.state?.view==='tracking'&&(trackingStockHoverContext===context||ladderStockHover?.pinned)&&state.date===context.date;
+    return history.state?.view==='ladder'&&ladderView===context.view&&(ladderStockHover?.pinned||(!context.view.dragging&&context.view.data===context.fullData));
   }
   function flushPendingTrackingHover(){
     if(!trackingPendingPayload)return;
     queueMicrotask(()=>{
       if(!trackingPendingPayload)return;
       if(history.state?.view!=='tracking'||trackingPendingPayload.date!==state.date){trackingPendingPayload=null;return;}
-      if(Watchlists.isOpen||ladderStockHover&&!ladderStockHover.card.hidden)return;
+      if(Watchlists.isOpen||ladderStockHover&&!ladderStockHover.card.hidden&&!ladderStockHover.pinned)return;
       const payload=trackingPendingPayload;trackingPendingPayload=null;renderTrackingTables(payload);
     });
   }
   async function showLadderStockHover(anchor){
-    if(Watchlists.isOpen)return;
+    if(Watchlists.isOpen||ladderStockHover?.pinned)return;
     const context=resolveStockHoverContext(anchor);if(!stockHoverContextCurrent(context,anchor))return;
     const showLatest=context.mode==='tracking'?trackingShowLatest:ladderShowLatest;
     const stock=ladderStockHoverRecord(context,anchor);
@@ -1444,7 +1481,7 @@
         if(!next.isLive)return;
         hover.card.querySelector('.vl-stock-preview-info').innerHTML=ladderStockPreviewInfo(stock,next);applyHoverCacheNote(hover,marketCacheSources.get(next));updateHoverCharts(hover,next,stock.date);
       });
-      hover.resizeObserver=new ResizeObserver(()=>{if(!hover.card.hidden)for(const chart of hover.charts){chart.resize();chart.setOffsetRightDistance(0);chart.scrollToRealTime(0);}});hover.resizeObserver.observe(hover.card);
+      hover.resizeObserver=new ResizeObserver(()=>{if(hover.pinned)clampPinnedPreview(hover.card);if(!hover.card.hidden)for(const chart of hover.charts){chart.resize();chart.setOffsetRightDistance(0);chart.scrollToRealTime(0);}});hover.resizeObserver.observe(hover.card);
       document.documentElement.dataset.stockMemoryCount=String(stockMemoryCache.size);document.documentElement.dataset.stockMemoryBytes=String(stockMemoryCache.bytes);document.documentElement.dataset.liveStockMemoryCount=String(liveStockMemoryCache.size);
       if(payload.isLive&&marketCacheSources.get(chartData)?.refresh)queueMicrotask(()=>{if(requestId===hover.requestId&&!hover.card.hidden)refreshPushedHover(hover);});
     }catch(error){complete=true;if(requestId!==hover.requestId||hover.anchor!==anchor||!stockHoverContextCurrent(context,anchor))return;for(const id of hover.chartIds)try{window.klinecharts.dispose(id);}catch{}hover.chartIds=[];hover.charts=[];hover.entries=null;for(const field of ['cacheSource','loadMs','renderMs','chartReused','dailyReadyMs','dailyPreloaded'])delete hover.card.dataset[field];hover.card.innerHTML=ladderStockPreviewInfo(stock,null)+'<div class="vl-stock-preview-loading">行情读取失败：'+esc(error.message)+'</div>';positionLadderStockHover(anchor,hover.card);}
@@ -1452,14 +1489,15 @@
   function ensureLadderStockHover(){
     if(ladderStockHover)return ladderStockHover;
     const card=document.createElement('section');card.id='ladderStockHover';card.className='vl-stock-preview';card.hidden=true;card.setAttribute('role','dialog');card.tabIndex=-1;document.body.append(card);
-    const hover=ladderStockHover={card,requestId:0,showTimer:0,hideTimer:0,anchor:null,chartIds:[],charts:[]};
+    const hover=ladderStockHover={card,requestId:0,showTimer:0,hideTimer:0,anchor:null,chartIds:[],charts:[],pinned:false};
+    installPreviewControls(hover,closeLadderStockHover);
     const scheduleHide=()=>{clearTimeout(hover.hideTimer);hover.hideTimer=setTimeout(closeLadderStockHover,180);};
     card.addEventListener('pointerenter',()=>{clearTimeout(hover.hideTimer);if(ladderTopicHover)clearTimeout(ladderTopicHover.hideTimer);if(ladderNestedThemeHover)clearTimeout(ladderNestedThemeHover.hideTimer);});
     card.addEventListener('pointerleave',event=>{if(hover.anchor?.contains(event.relatedTarget))return;scheduleHide();if(ladderTopicHover&&!ladderTopicHover.card.contains(event.relatedTarget)&&!ladderNestedThemeHover?.card.contains(event.relatedTarget))ladderTopicHover.hideTimer=setTimeout(closeLadderTopicHover,200);});
     document.addEventListener('pointerover',event=>{const anchor=event.target.closest(ladderStockPreviewSelector);if(!anchor||anchor.contains(event.relatedTarget))return;clearTimeout(hover.showTimer);clearTimeout(hover.hideTimer);if(ladderTopicHover)clearTimeout(ladderTopicHover.hideTimer);if(ladderNestedThemeHover)clearTimeout(ladderNestedThemeHover.hideTimer);if(hover.anchor===anchor&&!card.hidden)return;const context=resolveStockHoverContext(anchor),stock=context&&ladderStockHoverRecord(context,anchor),key=stock&&hoverPoolKey('stock',stock.code,stock.date,context?.mode==='tracking'?trackingShowLatest:ladderShowLatest)+(context?.mode==='tracking'?':tracking:'+trackingDailyStart(stock):'');hover.showTimer=setTimeout(()=>showLadderStockHover(anchor),key&&hoverChartPool.has(key)?100:280);});
     document.addEventListener('pointerout',event=>{const anchor=event.target.closest(ladderStockPreviewSelector);if(!anchor||anchor.contains(event.relatedTarget))return;clearTimeout(hover.showTimer);if(card.contains(event.relatedTarget))return;scheduleHide();});
     document.addEventListener('focusin',event=>{const anchor=event.target.closest(ladderStockPreviewSelector);if(anchor)showLadderStockHover(anchor);});
-    document.addEventListener('keydown',event=>{if(event.key==='Escape'&&!card.hidden){event.preventDefault();closeLadderStockHover();}},true);
+    document.addEventListener('keydown',event=>{if(event.key==='Escape'&&!card.hidden){event.preventDefault();closeLadderStockHover(true);}},true);
     document.addEventListener('scroll',event=>{if(!card.hidden&&!card.contains(event.target)&&!event.target.closest?.('#ladderTopicHover,#ladderNestedThemeHover'))closeLadderStockHover();},true);
     window.addEventListener('resize',closeLadderStockHover);return hover;
   }
@@ -1479,21 +1517,21 @@
     return {...base,isLive:true,oneMin:first.bars,fifteenMin:second.bars,daily:first.daily,updatedAt:one.updatedAt||new Date().toISOString()};
   }
   let indexHover=null;
-  function closeIndexHover(){
-    const hover=indexHover;if(!hover)return;clearTimeout(hover.showTimer);clearTimeout(hover.hideTimer);clearTimeout(hover.liveTimer);hover.liveRefresh=null;hover.liveRefreshPending=false;hover.requestId++;hover.anchor=null;hover.resizeObserver?.disconnect();hover.resizeObserver=null;
+  function closeIndexHover(force=false){
+    const hover=indexHover;if(!hover||(hover.pinned&&force!==true))return;hover.pinned=false;hover.drag=null;hover.card.classList.remove('is-pinned','is-dragging');clearTimeout(hover.showTimer);clearTimeout(hover.hideTimer);clearTimeout(hover.liveTimer);hover.liveRefresh=null;hover.liveRefreshPending=false;hover.requestId++;hover.anchor=null;hover.resizeObserver?.disconnect();hover.resizeObserver=null;
     parkHoverCharts(hover);hover.card.hidden=true;hover.entries=null;hover.chartIds=[];hover.charts=[];hover.lastPayload=null;hover.lastSignature='';hover.cacheKey='';hover.card.replaceChildren();flushPendingLiveLadder();
   }
   function indexPreviewInfo(item,date,daily=[]){
     const bar=daily.find(bar=>chartDayKey(bar)===date),previous=daily.filter(bar=>chartDayKey(bar)<date).at(-1),prior=Number(previous?.close),close=Number(bar?.close),pct=bar?.pct_chg??(bar&&prior>0?(close/prior-1)*100:null),percent=value=>value==null||!Number.isFinite(Number(value))?'—':(Number(value)>0?'+':'')+Number(value).toFixed(2)+'%',price=value=>value==null?'—':num(value),tone=pct==null?'':Number(pct)>=0?'pct-up':'pct-down';
     const facts=[['收盘点位',price(bar?.close),tone],['涨幅',percent(pct),tone],['振幅',bar&&prior>0?((Number(bar.high)-Number(bar.low))/prior*100).toFixed(2)+'%':'—'],['开盘涨幅',bar&&prior>0?percent((Number(bar.open)/prior-1)*100):'—'],['开盘',price(bar?.open)],['最高',price(bar?.high)],['最低',price(bar?.low)],['成交额',bar?.amount==null?'—':compactYuan(Number(bar.amount)*1000)]];
-    return `<header class="vl-stock-preview-head"><span class="vl-index-preview-badge">指</span><button type="button" class="index-name-link" data-preview-open-index="${item.code}" data-index-date="${date}">${esc(item.name)}</button><span>${esc(item.code)}</span><time>${esc(fmtDate(date))}</time></header><div class="vl-stock-preview-facts">${facts.map(([label,value,tone])=>`<div><span>${label}</span><b${tone?` class="${tone}"`:''}>${esc(value)}</b></div>`).join('')}</div>`;
+    return `<header class="vl-stock-preview-head"><span class="vl-index-preview-badge">指</span><button type="button" class="index-name-link" data-preview-open-index="${item.code}" data-index-date="${date}">${esc(item.name)}</button><span>${esc(item.code)}</span><time>${esc(fmtDate(date))}</time>${previewControls(indexHover)}</header><div class="vl-stock-preview-facts">${facts.map(([label,value,tone])=>`<div><span>${label}</span><b${tone?` class="${tone}"`:''}>${esc(value)}</b></div>`).join('')}</div>`;
   }
   async function showIndexHover(anchor){
-    if(Watchlists.isOpen)return;
+    if(Watchlists.isOpen||indexHover?.pinned)return;
     const item=INDEX_CATALOG.find(item=>item.code===anchor.dataset.indexPreview),date=anchor.dataset.indexDate;
     if(!item||(!state.dates.includes(date)&&date!==shanghaiDateKey())||!anchor.isConnected)return;
     const hover=indexHover,route=location.href;closeIndexHover();closeLadderStockHover();if(ladderTopicHover)clearTimeout(ladderTopicHover.hideTimer);
-    hover.anchor=anchor;const requestId=++hover.requestId,loadStarted=performance.now(),current=()=>requestId===hover.requestId&&hover.anchor===anchor&&anchor.isConnected&&location.href===route;
+    hover.anchor=anchor;const requestId=++hover.requestId,loadStarted=performance.now(),current=()=>requestId===hover.requestId&&hover.anchor===anchor&&(anchor.isConnected||hover.pinned)&&location.href===route;
     hover.card.dataset.index=item.code;hover.card.dataset.date=date;hover.card.setAttribute('aria-label',item.name+' · 基本信息与行情');hover.card.innerHTML=indexPreviewInfo(item,date)+'<div class="vl-stock-preview-loading" aria-live="polite">正在读取指数行情…</div>';hover.card.hidden=false;positionLadderStockHover(anchor,hover.card);
     try{
       const payload=await getIndexHoverPayload(item,date);hover.card.dataset.cacheSource=marketCacheSources.get(payload)?.source||'network';if(!current()){if(requestId===hover.requestId)closeIndexHover();return;}
@@ -1502,12 +1540,13 @@
         const next=await getIndexHoverPayload(item,date);if(!current()||!next.isLive)return;
         const series=updateHoverCharts(hover,next,date);hover.card.querySelector('.vl-stock-preview-info').innerHTML=indexPreviewInfo(item,date,series.daily);
       });
-      hover.resizeObserver=new ResizeObserver(()=>{if(!hover.card.hidden)for(const chart of hover.charts){chart.resize();chart.setOffsetRightDistance(0);chart.scrollToRealTime(0);}});hover.resizeObserver.observe(hover.card);
+      hover.resizeObserver=new ResizeObserver(()=>{if(hover.pinned)clampPinnedPreview(hover.card);if(!hover.card.hidden)for(const chart of hover.charts){chart.resize();chart.setOffsetRightDistance(0);chart.scrollToRealTime(0);}});hover.resizeObserver.observe(hover.card);
     }catch(error){if(!current())return;hover.card.innerHTML=indexPreviewInfo(item,date)+'<div class="vl-stock-preview-loading">行情读取失败：'+esc(error.message)+'</div>';positionLadderStockHover(anchor,hover.card);}
   }
   function setupIndexHover(){
     const card=document.createElement('section');card.id='indexHover';card.className='vl-stock-preview vl-index-preview';card.hidden=true;card.setAttribute('role','dialog');card.tabIndex=-1;document.body.append(card);
-    const hover=indexHover={card,requestId:0,showTimer:0,hideTimer:0,anchor:null,chartIds:[],charts:[]},selector='[data-index-preview][data-index-date]';
+    const hover=indexHover={card,requestId:0,showTimer:0,hideTimer:0,anchor:null,chartIds:[],charts:[],pinned:false},selector='[data-index-preview][data-index-date]';
+    installPreviewControls(hover,closeIndexHover);
     const scheduleHide=()=>{clearTimeout(hover.hideTimer);hover.hideTimer=setTimeout(closeIndexHover,180);};
     card.addEventListener('pointerenter',()=>{clearTimeout(hover.hideTimer);if(ladderTopicHover)clearTimeout(ladderTopicHover.hideTimer);});
     card.addEventListener('pointerleave',event=>{if(hover.anchor?.contains(event.relatedTarget))return;scheduleHide();if(ladderTopicHover&&!ladderTopicHover.card.contains(event.relatedTarget))ladderTopicHover.hideTimer=setTimeout(closeLadderTopicHover,220);});
@@ -1516,7 +1555,7 @@
     document.addEventListener('focusin',event=>{const anchor=event.target.closest(selector);if(anchor)requestAnimationFrame(()=>{if(document.activeElement===anchor&&anchor.isConnected)showIndexHover(anchor);});});
     document.addEventListener('focusout',event=>{if(event.target.closest(selector)&&!card.contains(event.relatedTarget))scheduleHide();});
     document.addEventListener('click',event=>{const anchor=event.target.closest(selector+',[data-preview-open-index]');if(!anchor)return;event.preventDefault();event.stopPropagation();openIndex(anchor.dataset.indexPreview||anchor.dataset.previewOpenIndex,anchor.dataset.indexDate);});
-    document.addEventListener('keydown',event=>{if(event.key==='Escape'&&!card.hidden){event.preventDefault();event.stopPropagation();closeIndexHover();}},true);
+    document.addEventListener('keydown',event=>{if(event.key==='Escape'&&!card.hidden){event.preventDefault();event.stopPropagation();closeIndexHover(true);}},true);
     document.addEventListener('scroll',event=>{if(!card.hidden&&!card.contains(event.target)&&!event.target.closest?.('#ladderTopicHover'))closeIndexHover();},true);
     window.addEventListener('resize',closeIndexHover);
   }
@@ -2540,7 +2579,7 @@
     const signature=JSON.stringify([payload.date,payload.top,payload.bottom,payload.sideways,payload.stocks]);
     if(trackingTableSignatures.get(host)===signature)return;
     // Keep the hovered row mounted while pushed quotes update the tracking tables.
-    if(ladderStockHover&&!ladderStockHover.card.hidden&&host.contains(ladderStockHover.anchor)){
+    if(ladderStockHover&&!ladderStockHover.card.hidden&&!ladderStockHover.pinned&&host.contains(ladderStockHover.anchor)){
       trackingPendingPayload=payload;return;
     }
     trackingTableSignatures.set(host,signature);
