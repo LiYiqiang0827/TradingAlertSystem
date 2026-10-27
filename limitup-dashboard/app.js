@@ -2488,7 +2488,7 @@
     syncBrowserRoute('ladder',state.date);renderLimitupLadder();
   }
   const trackingMemory=new DeadlineLRU(12,8*CACHE_MIB,10*60000);
-  let trackingRequestId=0,trackingMiniObserver=null,trackingLoading=null;
+  let trackingRequestId=0,trackingMiniObserver=null,trackingLoading=null,trackingActiveTab='top';
   const trackingTableSignatures=new WeakMap();
   function openLimitupTracking(){
     syncBrowserRoute('tracking',state.date);renderLimitupTracking();
@@ -2505,9 +2505,9 @@
   function renderTrackingTables(payload){
     const host=$('#limitupTrackingContent');if(!host)return;
     const descriptions={continuous:'当日仍连板',fresh_break:'昨日2板及以上，今日未封涨停',return5:'两次涨停之间有1–5个未涨停交易日',return10:'两次涨停之间有6–10个未涨停交易日',return20:'两次涨停之间有11–20个未涨停交易日',return30:'两次涨停之间有21–30个未涨停交易日',ma5:'当日价格区间触及MA5',ma10:'当日价格区间触及MA10',ma20:'当日价格区间触及MA20',ma30:'当日价格区间触及MA30',ma60:'当日价格区间触及MA60',origin:'连板取首板收盘价；首板取前一日收盘价'};
-    const table=(title,columns)=>{
+    const table=(key,columns)=>{
       const height=Math.max(0,...columns.map(c=>c.codes.length));
-      return `<section class="tracking-section"><h2>${title}</h2><div class="tracking-table-scroll"><table class="tracking-table" style="--tracking-columns:${columns.length}"><thead><tr>${columns.map(c=>`<th scope="col" title="${esc(descriptions[c.key]+'；按当时连板高度降序')}">${esc(c.title)}<small>${c.codes.length}</small></th>`).join('')}</tr></thead><tbody>${Array.from({length:Math.max(1,height)},(_,i)=>`<tr>${columns.map(c=>`<td>${c.codes[i]?trackingStockCard(payload.stocks[c.codes[i]],c.key,payload.date):i===0?'<span class="tracking-empty">—</span>':''}</td>`).join('')}</tr>`).join('')}</tbody></table></div></section>`;
+      return `<section class="tracking-section" id="tracking-panel-${key}" role="tabpanel" aria-labelledby="tracking-tab-${key}" ${trackingActiveTab===key?'':'hidden'}><div class="tracking-table-scroll"><table class="tracking-table" style="--tracking-columns:${columns.length}"><thead><tr>${columns.map(c=>`<th scope="col" title="${esc(descriptions[c.key]+'；按当时连板高度降序')}">${esc(c.title)}<small>${c.codes.length}</small></th>`).join('')}</tr></thead><tbody>${Array.from({length:Math.max(1,height)},(_,i)=>`<tr>${columns.map(c=>`<td>${c.codes[i]?trackingStockCard(payload.stocks[c.codes[i]],c.key,payload.date):i===0?'<span class="tracking-empty">—</span>':''}</td>`).join('')}</tr>`).join('')}</tbody></table></div></section>`;
     };
     const signature=JSON.stringify([payload.date,payload.top,payload.bottom,payload.stocks]);
     if(trackingTableSignatures.get(host)===signature)return;
@@ -2525,7 +2525,7 @@
         previousBoard:item.board,previousBoardPeriod:item.boardPeriod});
     }
     trackingStockHoverContext={mode:'tracking',date:payload.date,dataVersion:payload.dataVersion,stocks};ensureLadderStockHover();
-    host.innerHTML=table('当日或者昨日涨停类',payload.top)+table('非当日涨停类',payload.bottom);
+    host.innerHTML=table('top',payload.top)+table('bottom',payload.bottom);
     const meta=$('#trackingMeta');if(meta)meta.textContent=`近30个交易日 · ${payload.screenedCount}股${payload.missingDailyCount?' · '+payload.missingDailyCount+'股缺当日行情':''}`;
     host.dataset.date=payload.date;host.dataset.source=payload.source;host.dataset.calculationMs=payload.calculationMs;host.dataset.dataVersion=payload.dataVersion;
     trackingMiniObserver?.disconnect();trackingMiniObserver=new IntersectionObserver(entries=>{
@@ -2561,7 +2561,12 @@
     $('#topbarActions').innerHTML=`<div class="review-date-controls topbar-date-controls"><button id="prevTrackingDate" class="date-nav-button" ${pos<=0?'disabled':''}>← 前一日</button>${datePickerTriggerMarkup('trackingDatePickerTrigger','date-nav-button')}<button id="nextTrackingDate" class="date-nav-button" ${pos>=state.dates.length-1?'disabled':''}>后一日 →</button></div><button id="refreshTracking" class="light-button" type="button">刷新</button>`;
     const choose=step=>{const date=state.dates[state.dates.indexOf(state.date)+step];if(date){state.date=date;syncBrowserRoute('tracking',date);renderLimitupTracking();}};
     $('#prevTrackingDate').onclick=()=>choose(-1);$('#nextTrackingDate').onclick=()=>choose(1);$('#refreshTracking').onclick=()=>loadLimitupTracking({force:true});
-    content.innerHTML='<section class="limitup-tracking-page" aria-label="涨停跟踪"><div class="tracking-heading"><h1>涨停跟踪</h1><span id="trackingMeta"></span></div><div id="trackingError" class="tracking-error" role="status" hidden></div><div id="limitupTrackingContent"><div class="loading"><span class="spinner"></span><p>正在筛选后续走势…</p></div></div></section>';
+    content.innerHTML='<section class="limitup-tracking-page" aria-label="涨停跟踪"><div class="tracking-heading"><h1>涨停跟踪</h1><span id="trackingMeta"></span></div><div class="tracking-tabs" role="tablist" aria-label="涨停跟踪分类"><button id="tracking-tab-top" type="button" role="tab" aria-controls="tracking-panel-top" data-tracking-tab="top">连板</button><button id="tracking-tab-bottom" type="button" role="tab" aria-controls="tracking-panel-bottom" data-tracking-tab="bottom">回调均线</button></div><div id="trackingError" class="tracking-error" role="status" hidden></div><div id="limitupTrackingContent"><div class="loading"><span class="spinner"></span><p>正在筛选后续走势…</p></div></div></section>';
+    const tabs=content.querySelector('.tracking-tabs');
+    const selectTab=key=>{trackingActiveTab=key;closeLadderStockHover();tabs.querySelectorAll('[data-tracking-tab]').forEach(button=>{const selected=button.dataset.trackingTab===key;button.setAttribute('aria-selected',String(selected));button.tabIndex=selected?0:-1;});content.querySelectorAll('.tracking-section[role=tabpanel]').forEach(panel=>{panel.hidden=panel.id!=='tracking-panel-'+key;});};
+    tabs.addEventListener('click',event=>{const button=event.target.closest('[data-tracking-tab]');if(button)selectTab(button.dataset.trackingTab);});
+    tabs.addEventListener('keydown',event=>{if(!['ArrowLeft','ArrowRight','Home','End'].includes(event.key))return;event.preventDefault();const key=event.key==='Home'?'top':event.key==='End'?'bottom':trackingActiveTab==='top'?'bottom':'top';selectTab(key);tabs.querySelector('[data-tracking-tab="'+key+'"]').focus();});
+    selectTab(trackingActiveTab);
     renderNav();syncLivePushConnection();window.scrollTo(0,0);loadLimitupTracking();
   }
   function openHome(date=history.state?.date||state.date,historyMode='push'){if(needsReviewDate(date)){syncBrowserRoute('home',date,'','',historyMode);loadDate(date);return;}syncBrowserRoute('home',date,'','',historyMode);state.topic=null;state.stock=null;state.index=null;state.indexData=null;renderHome();}

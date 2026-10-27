@@ -405,7 +405,7 @@ cd ~/TradingAlertSystem/limitup-dashboard
 
 ### 涨停跟踪
 
-独立页面 `?view=tracking&date=YYYYMMDD`，接口 `/api/limitup-tracking?date=YYYYMMDD`。上下两张表按列排序、筛选。回调类互斥，按左到右首个命中归类：MA5 → 涨停启动位 → MA10 → MA20 → MA30 → MA60。
+独立页面 `?view=tracking&date=YYYYMMDD`，接口 `/api/limitup-tracking?date=YYYYMMDD`。通过“连板”和“回调均线”标签切换两张表，每次显示一张，保留当前选项并按列排序、筛选。回调类互斥，按左到右首个命中归类：MA5 → 涨停启动位 → MA10 → MA20 → MA30 → MA60。
 
 - 上表：当日连板、昨日2板及以上今日刚断板、当日/昨日再次涨停的1–5、6–10、11–20、21–30个交易日间隔。间隔是上次涨停与本次涨停之间的交易日数；连续涨停不算再次涨停。
 - 再次涨停列按前次涨停的板数降序，显示前一轮板数、前一轮原始题材，圆圈为虚线；连板列显示当前板数和实线圈。几天几板显示为“板数/天数”。其他历史板数为虚线。
