@@ -416,3 +416,30 @@ cd ~/TradingAlertSystem/limitup-dashboard
 题材配色复用天梯的题材颜色映射；同一题材在上下两张表中用相同的侧边线、淡背景、板数圈和题材文字颜色。实线/虚线仍只表示当前/历史板数。
 
 股票名悬停或键盘聚焦可打开共享个股悬浮窗：所选日期基本信息、最近5个交易日分时、最近3个月15分钟、日K。日线初始可见范围至少覆盖本轮涨停日前3个月并延伸至所选日；再次涨停列从上一轮涨停日向前3个月取可见范围。新股仅展示已上市数据。共享行情缓存与有限图表实例池；跟踪页不受天梯“显示最新”开关影响，不主动读取复盘日后的行情。在线表格刷新在悬浮窗关闭后再应用，避免悬停时股票行被替换。
+
+
+## 数据库状态与手动更新
+
+侧栏底部“库”打开数据库窗口，按 Mac mini 当前实际使用的离线库、在线月库、Neo4j 和 Redis 分页；
+排除备份、研究快照和已弃用分钟库。表格显示数据表名称、最新日期/时间和更新按钮。
+状态接口仅查询现有 ctrl、发布 metadata、import_runs 或 source_checkpoint 等更新控制记录，
+不扫描业务事实表计算 MAX；没有独立控制记录的表显示“未记录”，不以源同步日期冒充模型分析日期。
+DuckDB被采集进程占用时返回明确的写入中状态；若已有成功快照则标明读取时间并显示旧记录、禁用更新按钮，
+无快照时显示暂时无法读取，绝不把锁错误当作空库或新鲜数据。
+
+- `GET /api/databases`：正式库清单。
+- `GET /api/database-status?database=one-minute`：当前库各表断点；服务端按数据/WAL版本缓存10秒。
+- `POST /api/database-update`：同源 JSON `{ "databaseId": "one-minute", "table": "one_min_bars（Parquet主数据）" }`，后台提交现有增量服务。
+- `GET /api/database-update-jobs?database=one-minute`：任务状态；仅窗口打开且有运行任务时轮询。
+
+更新入口固定白名单，使用 manager 的现有 service，并加载正式 scheduler 配置的环境文件；
+浏览器不能传 SQL、路径或命令。默认逐个运行手动任务，已有相同采集进程时拒绝重复启动。
+周/月更新先完成日线和因子依赖；指数更新从日线断点开始；分钟库使用各自正式增量链路。
+模型分析和历史只读回退库不提供通用采集按钮，禁用按钮可悬停查看原因。
+日志保存在 `~/Library/Logs/TradingAlertSystem/database-updates/`，凭据和日志正文不返回页面。
+
+配套 TradeDataManager 版本：[ac32a68](https://github.com/LiYiqiang0827/TradeDataManager/commit/ac32a68)。
+需要 `offlineDataManager/scripts/core/minute_control.py`：正式一分钟 catalog 内
+`tbl_one_minute_ctrl`、15分钟 DuckDB 内 `tbl_fifteen_minute_ctrl`。旧库先运行
+`cd ~/TradingDataManager/offlineDataManager/scripts && ../../.venv/bin/python -m core.minute_control`
+初始化，之后正常每日更新自动维护。Ctrl 的最大日期不代表全市场完整性审计。

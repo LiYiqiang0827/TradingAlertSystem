@@ -45,6 +45,8 @@ from live_stock_monitor import LiveStockMonitor
 LIVE_STOCK_MONITOR=LiveStockMonitor(sys.modules[__name__])
 from limitup_tracking import LimitupTracking
 LIMITUP_TRACKING=LimitupTracking(sys.modules[__name__])
+from database_status import DatabaseStatus, DatabaseBusy
+DATABASE_STATUS=DatabaseStatus(sys.modules[__name__])
 
 LADDER_STORE=LimitupLadderStore()
 _ladder_dates_snapshot=None
@@ -2494,7 +2496,7 @@ class Handler(SimpleHTTPRequestHandler):
         if compressed: body=gzip.compress(body,compresslevel=1,mtime=0)
         self.send_response(status)
         self.send_header("Content-Type","application/json; charset=utf-8")
-        if not urlparse(self.path).path.startswith("/api/watchlists"):
+        if not urlparse(self.path).path.startswith(("/api/watchlists","/api/database")):
             self.send_header("Access-Control-Allow-Origin","*")
         self.send_header("Vary","Accept-Encoding")
         self.send_header("Cache-Control","no-store")
@@ -2524,6 +2526,9 @@ class Handler(SimpleHTTPRequestHandler):
     def do_GET(self):
         u=urlparse(self.path); q=parse_qs(u.query)
         try:
+            if u.path=='/api/databases':return self.send_json(DATABASE_STATUS.catalog())
+            if u.path=='/api/database-status':return self.send_json(DATABASE_STATUS.detail(q.get('database',[''])[0],force=q.get('force',['0'])[0]=='1'))
+            if u.path=='/api/database-update-jobs':return self.send_json({'jobs':DATABASE_STATUS.job_list(q.get('database',[None])[0])})
             if u.path=='/api/limitup-tracking':return self.send_json(LIMITUP_TRACKING.data(safe_date(q.get('date',[''])[0])))
             if u.path=='/api/watchlists':return self.send_json(watchlists_store().snapshot())
             if u.path=='/api/live-monitor-stocks':
@@ -2894,12 +2899,14 @@ class Handler(SimpleHTTPRequestHandler):
                 self.send_error(404)
             else:
                 super().do_GET()
+        except DatabaseBusy as e:
+            self.send_json({"error":str(e),"busy":True},503)
         except Exception as e:
             traceback.print_exc(); self.send_json({"error":str(e)},500)
     def do_POST(self):
         try:
             u=urlparse(self.path)
-            if u.path in ("/api/watchlists/groups","/api/watchlists/stocks"):
+            if u.path in ("/api/watchlists/groups","/api/watchlists/stocks","/api/database-update"):
                 origin=self.headers.get("Origin")
                 if (origin and urlparse(origin).netloc!=self.headers.get("Host")) or self.headers.get("Sec-Fetch-Site")=="cross-site":
                     return self.send_json({"error":"请求来源无效"},403)
@@ -2909,6 +2916,7 @@ class Handler(SimpleHTTPRequestHandler):
                 if not 0<size<=100_000:return self.send_json({"error":"请求内容无效"},413)
                 body=json.loads(self.rfile.read(size))
                 if not isinstance(body,dict):raise ValueError("请求内容无效")
+                if u.path=="/api/database-update":return self.send_json(DATABASE_STATUS.start_update(body.get("databaseId"),body.get("table")),202)
                 store=watchlists_store()
                 try:
                     payload=(store.create_group(body.get("name"),body.get("stock")) if u.path.endswith("/groups")
