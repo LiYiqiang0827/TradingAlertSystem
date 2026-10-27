@@ -41,6 +41,9 @@ def watchlists_store():
                 WATCHLISTS.refresh()
     return WATCHLISTS
 
+from live_stock_monitor import LiveStockMonitor
+LIVE_STOCK_MONITOR=LiveStockMonitor(sys.modules[__name__])
+
 LADDER_STORE=LimitupLadderStore()
 _ladder_dates_snapshot=None
 
@@ -104,6 +107,10 @@ def live_monitor_data():
             if int(count)==0 and when.strftime('%Y%m%d')==status['date'] and (not pool['updatedAt'] or when.isoformat()>=pool['updatedAt']):
                 pool.update(count=0,available=True,updatedAt=when.isoformat())
         except (TypeError,ValueError):pass
+        if not pool['available'] and status['phase'] in ('recess','closed'):
+            rows,at,source=read_online_close(kind,status['date'],client)
+            if source!='unavailable' and at:
+                pool.update(count=len(rows),available=True,updatedAt=datetime.datetime.fromtimestamp(at,ZoneInfo('Asia/Shanghai')).isoformat())
         pools[kind]=pool
     return {"status":status,"pools":pools}
 
@@ -374,7 +381,8 @@ def live_push_event(updates):
             stamp=float(stamp);stamp=stamp/1000 if stamp>1e12 else stamp
             quote={'code':code,'price':row.get('last_price',row.get('close_price')),
                    'pct':row.get('price_change_ratio_pct',row.get('pct_chg')),'timestamp':stamp,
-                   'volume':row.get('volume'),'amount':row.get('turnover',row.get('amount'))}
+                   'volume':row.get('volume'),'amount':row.get('turnover',row.get('amount')),
+                   'prevPrice':row.get('prev_price'),'open':row.get('open_price'),'high':row.get('high_price'),'low':row.get('low_price')}
             (indices if kind=='snapshot_index' else quotes).append(quote)
     if kinds&{'snapshot','limitperformance','zt','break'}:CACHE.delete('ladder-live-snapshot:v5:'+now.strftime('%Y%m%d'))
     if 'snapshot_index' in kinds:CACHE.delete('ladder-live-index-quotes:v1:'+now.strftime('%Y%m%d'))
@@ -2500,6 +2508,14 @@ class Handler(SimpleHTTPRequestHandler):
         u=urlparse(self.path); q=parse_qs(u.query)
         try:
             if u.path=='/api/watchlists':return self.send_json(watchlists_store().snapshot())
+            if u.path=='/api/live-monitor-stocks':
+                return self.send_json(LIVE_STOCK_MONITOR.page(int(q.get('offset',['0'])[0]),int(q.get('limit',['30'])[0]),int(q.get('days',['20'])[0]),q.get('rosterId',[''])[0]))
+            if u.path=='/api/live-monitor-quotes':
+                day=safe_date(q.get('date',[''])[0]);codes=LIVE_STOCK_MONITOR.codes(q.get('codes',[''])[0])
+                return self.send_json({'date':day,'items':LIVE_STOCK_MONITOR.facts(codes,day,hydrate=True)})
+            if u.path=='/api/live-monitor-charts':
+                day=safe_date(q.get('date',[''])[0]);codes=LIVE_STOCK_MONITOR.codes(q.get('codes',[''])[0],3)
+                return self.send_json(LIVE_STOCK_MONITOR.charts(codes,day))
             if u.path=='/api/live-events':return self.live_events()
             if u.path=='/api/live-push-status':return self.send_json(PUSH_HUB.status())
             if u.path=="/api/ladder-live-status":

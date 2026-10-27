@@ -166,9 +166,9 @@
     $('#crumbCurrent').textContent='实时监控';$('#crumbCurrent').hidden=false;
     $('#crumbBack').hidden=true;$('#crumbWorkspace').hidden=true;$('#crumbSeparator').hidden=true;
     $('#topbarActions').innerHTML='<button id="refreshLive" class="light-button" type="button">刷新</button>';
-    $('#refreshLive').onclick=()=>refreshLivePage();
+    $('#refreshLive').onclick=()=>{refreshLivePage();window.TradingLiveStocks?.refresh();};
     content.innerHTML='<div class="live-page-heading"><div class="live-heading-copy"><span class="eyebrow">LIVE MONITOR</span><h1>实时监控</h1><div id="liveMonitorMeta" class="live-monitor-meta"></div></div><div class="live-header-indices"><div class="live-indices-group"><div class="live-period-switch" role="group" aria-label="指数图表周期"><button type="button" data-live-period="oneMin" title="1分钟分时">1</button><button type="button" data-live-period="fifteenMin" title="15分钟K线">15</button><button type="button" data-live-period="daily" title="日K线">日</button><button type="button" data-live-period="weekly" title="周K线">周</button><button type="button" data-live-period="monthly" title="月K线">月</button></div><div class="live-indices-scroll"><div id="liveIndicesGrid" class="live-indices-grid"></div></div><button id="liveIndexGroupToggle" class="live-index-group-toggle" type="button" aria-label="切换指数分组">›</button></div></div></div><div id="liveMonitorBody" class="live-monitor-body" aria-live="polite">正在连接实时数据…</div>';
-    setupLiveIndexSwitches();if(state.review)renderNav();applyLiveControls();
+    setupLiveIndexSwitches();ensureLiveMonitorLayout();if(state.review)renderNav();applyLiveControls();
   }
   function liveIndexZoomSeries(zoom,live){
     const key=zoom.period,day=zoom.date,base=zoom.baseData;
@@ -293,7 +293,8 @@
   function disposeLiveIndexCharts(){for(const entry of liveIndexCharts.values())entry.observer?.disconnect();liveIndexCharts.clear();}
   function ensureLiveMonitorLayout(){
     const body=$('#liveMonitorBody');if(!body)return false;
-    if(!$('#livePoolGrid'))body.innerHTML='<p id="liveIndicesError" class="live-data-error" hidden></p><div id="livePoolGrid" class="live-monitor-grid"></div>';
+    if(!$('#livePoolGrid'))body.innerHTML='<p id="liveIndicesError" class="live-data-error" hidden></p><div id="livePoolGrid" class="live-monitor-grid"></div><section id="liveStockMonitor" class="live-stock-monitor"></section>';
+    window.TradingLiveStocks?.mount($('#liveStockMonitor'));
     return true;
   }
   function liveSessionMinute(timestamp){const d=new Date(timestamp+8*3600000),minute=d.getUTCHours()*60+d.getUTCMinutes();return minute>=780?120+minute-780:minute-570;}
@@ -377,7 +378,7 @@
       const status=indices.status==='fulfilled'?indices.value.status:pools.status==='fulfilled'?pools.value.status:liveStatus;
       $('#liveMonitorMeta').textContent=status?`${fmtDate(status.date)} · ${status.label} · 主动推送`:'';
       const error=$('#liveIndicesError');error.hidden=indices.status==='fulfilled';
-      if(indices.status==='fulfilled'){observeIndexDataVersion(indices.value);renderLiveIndices(indices.value);updateLiveIndexZoom(indices.value);}
+      if(indices.status==='fulfilled'){observeIndexDataVersion(indices.value);renderLiveIndices(indices.value);window.TradingLiveStocks?.resize();updateLiveIndexZoom(indices.value);}
       else{error.textContent=indices.reason.message+'；图中保留上次快照。';document.querySelectorAll('.live-index-time').forEach(label=>label.textContent='连接中断 · 保留上次快照');}
       if(zoomData.status==='fulfilled'&&zoomData.value)updateLiveIndexZoom(zoomData.value);
       const updated=pool=>pool.updatedAt?new Date(pool.updatedAt).toLocaleTimeString('zh-CN',{timeZone:'Asia/Shanghai',hour12:false}):'—';
@@ -429,7 +430,7 @@
     if(event.status)receiveLiveMarketStatus(event.status);
     if(!liveEnabled||document.hidden)return;
     if(ladderView&&event.receivedAt)ladderView.lastPushReceivedAt=event.receivedAt;
-    noteLiveStockChanges(event);patchPushedStockQuotes(event);
+    noteLiveStockChanges(event);patchPushedStockQuotes(event);window.TradingLiveStocks?.push(event);
     livePushPending||={kinds:new Set(),codes:new Set(),resync:false,ladderStatus:null};
     for(const item of event.updates||[]){livePushPending.kinds.add(item.kind);for(const code of item.codes||[])livePushPending.codes.add(code);}
     for(const quote of event.quotes||[])livePushPending.codes.add(quote.code);

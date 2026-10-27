@@ -381,3 +381,16 @@ cd ~/TradingAlertSystem/limitup-dashboard
 请同时更新 TradingDataManager 至 `f73eed2` 或更新的 main（[coreClient/watchlist.py](https://github.com/LiYiqiang0827/TradeDataManager/blob/f73eed2/coreClient/watchlist.py)，旧 `theme-graph-chain-v1` 标签不包含本功能）。
 无需新增凭据；Redis 连接沿用网页现有配置。`TRADING_WATCHLIST_DB` 可覆盖自选库位置，
 用于隔离示例/验证库；默认仍在正式 offline 目录。不要把生成的 SQLite 数据库提交到 Git。
+
+
+## 实时自选与最近涨停监测（2026-10-27）
+
+- 实时监控页面将自选分组内股票与近 **20 个交易日**涨停股合并、按代码去重，两种来源同时标注。默认自选在前，最近涨停股按最近涨停日排序。当天的涨停后开板股也纳入当日监测。
+- 历史名单读取 `offline/limitup_ladder.db`；尚未构建的日期从 KPL 涨停表补齐，当天叠加在线涨停快照，不依赖归因是否完成。
+- `GET /api/live-monitor-stocks?offset=0&limit=30&days=20` 返回首批 **30** 只及 `rosterId`。后续分页携带该 ID 固定顺序，滚动到列表底部再取下一批；版本过期时返回 `resetRequired`。
+- 当前可视行才请求 `/api/live-monitor-charts?date=YYYYMMDD&codes=...`，每批最多 3 只、浏览器最多 2 批并发，服务端独立 3 线程池。分时图覆盖当日到收盘的横轴，15 分钟保留最近 80 根，日线最近 20 根，成交量为细竖线。
+- 日线和历史 15 分钟读取已复权离线数据；当日优先从 Redis tick 拟合，缺少早盘 tick 时补读 TDX 原生 1 分钟，不用 15 分钟替代 1 分钟。当日 15 分钟由这些 1 分钟聚合。图表 `sources` 和悬停标题注明来源。
+- 首屏只取轻量列表；历史图表缓存 300 秒、当日缩略图缓存 5 秒，浏览器保存最近 120 只图表。沿用已有 SSE 推送更新涨幅、换手率和可视图表末端，不启动浏览器报价轮询。定期校正图表由行情事件触发，而非定时拉全列表。
+- 缺少当日官方自由换手率时，使用当前累计成交股数 / 最近有效自由流通股本估算，显示 `≈`；无当前行情时显示横线，较旧行情明确提示延迟。没有在线 tick 的新订阅股票可暂用原生分钟行情，鼠标停在涨幅处可看来源及时间。
+- 当前请求的股票写入 Redis 6380 `online:dashboard:snapshot-demand:YYYYMMDD`（每股 180 秒租期）。TradingDataManager 的 snapshot 采集器将其与原采集股票池合并，继续通过原 Redis Stream/SSE 发送。只扩展股票快照采集，不扩展盘口、分钟下载等其他采集任务。午休保留上午数据，下午采集进程启动时自动加载新逻辑。
+- 后端模块：`live_stock_monitor.py`；前端模块：`live_stocks.js`。同时更新 TradingDataManager 至 `037653a` 或更新版本（`onlineDataManager/scripts/service/service_writeredis_snapshot.py`）。已有 snapshot 进程需重启该采集器；午休由 scheduler 停止的进程会在下午启动时读取新代码。数据库及 Redis 位置沿用原配置，没有新增凭据或依赖包。
