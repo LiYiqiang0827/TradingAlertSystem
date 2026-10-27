@@ -10,6 +10,8 @@ import math
 import re
 import sqlite3
 import time
+import threading
+from collections import OrderedDict
 from zoneinfo import ZoneInfo
 
 ZONE = ZoneInfo('Asia/Shanghai')
@@ -28,6 +30,28 @@ class LiveStockMonitor:
     def __init__(self, runtime):
         self.r = runtime
         self.pool = ThreadPoolExecutor(max_workers=3, thread_name_prefix='monitor-mini')
+        self.series_lock = threading.RLock()
+        self.series_keys = None
+        self.series_index_at = 0
+
+    def _remember_series(self, key, record, write=True):
+        """Bound the persistent last-good snapshot cache, including across restarts."""
+        r = self.r
+        with self.series_lock:
+            now = time.time()
+            if self.series_keys is None:
+                self.series_keys = OrderedDict(r.CACHE.get('live-monitor-series-index:v1') or [])
+            new = key not in self.series_keys
+            self.series_keys.pop(key, None)
+            self.series_keys[key] = now
+            if write:r.CACHE.set(key, record, 7*86400)
+            while len(self.series_keys)>120:
+                old, _ = self.series_keys.popitem(last=False)
+                r.CACHE.delete(old)
+                new = True
+            if new or now-self.series_index_at>30:
+                r.CACHE.set('live-monitor-series-index:v1', list(self.series_keys.items()), 7*86400)
+                self.series_index_at = now
 
     def codes(self, value, maximum=30):
         codes = list(dict.fromkeys(value.split(',')))
@@ -44,14 +68,19 @@ class LiveStockMonitor:
                 names = dict(c.execute('SELECT ts_code,name FROM tbl_cn_basic'))
             if not dates:
                 raise RuntimeError('交易日历暂无监测日期')
-            recent = {}
+            recent, themes = {}, {}
             graph = r.DBROOT/'offline/limitup_ladder.db'
             ready = set()
             if graph.exists():
                 with closing(sqlite3.connect(f'file:{graph}?mode=ro', uri=True, timeout=3)) as c:
                     ready = {v[0] for v in c.execute('SELECT day FROM trade_dates WHERE ready=1 AND day BETWEEN ? AND ?', (dates[0], dates[-1]))}
-                    for code, last in c.execute("SELECT code,MAX(day) FROM nodes WHERE kind='sealed' AND day BETWEEN ? AND ? GROUP BY code", (dates[0], dates[-1])):
+                    for code, last, theme in c.execute("SELECT code,MAX(day),original_theme FROM nodes WHERE kind='sealed' AND day BETWEEN ? AND ? GROUP BY code", (dates[0], dates[-1])):
                         recent[code] = last
+                        if theme:themes[code] = theme
+            with closing(sqlite3.connect(f'file:{r.KPL_DB}?mode=ro',uri=True,timeout=3)) as c:
+                if c.execute("SELECT 1 FROM sqlite_master WHERE name='tbl_cn_kpl_limit_performance'").fetchone():
+                    for code, theme in c.execute('SELECT ts_code,theme FROM tbl_cn_kpl_limit_performance WHERE trade_date BETWEEN ? AND ? ORDER BY trade_date',(dates[0],dates[-1])):
+                        if theme and str(theme).strip():themes[code] = str(theme).strip()
             # KPL can publish before the read-optimized ladder has finished updating.
             missing = [d for d in dates if d not in ready]
             if missing:
@@ -62,8 +91,8 @@ class LiveStockMonitor:
                             continue
                         for code, last in c.execute(f'SELECT ts_code,MAX(trade_date) FROM {table} WHERE trade_date IN ({marks}) AND {condition} GROUP BY ts_code', missing):
                             recent[code] = max(last, recent.get(code, ''))
-            return {'dates': dates, 'recent': recent, 'names': names}
-        return r.cached_series(f'live-monitor-history:v1:{day}:{sessions}:{version}', load, 300)
+            return {'dates': dates, 'recent': recent, 'names': names, 'themes':themes}
+        return r.cached_series(f'live-monitor-history:v2:{day}:{sessions}:{version}', load, 300)
 
     def roster(self, sessions=20):
         if not 1 <= sessions <= 60:
@@ -74,12 +103,14 @@ class LiveStockMonitor:
         watch = r.watchlists_store().snapshot()
         recent = dict(history['recent'])
         names = dict(history['names'])
+        themes = dict(history['themes'])
         live = r.live_ladder_snapshot()
         if live.get('available') and live['date'] == history['dates'][-1]:
             # A stock that opened its limit-up board has still hit limit-up today.
             for code, item in {**live.get('pool', {}), **live.get('failed', {})}.items():
                 recent[code] = live['date']
                 names[code] = item.get('name') or names.get(code, code)
+                if item.get('theme') and item['theme'] != '暂无题材':themes[code] = item['theme']
         rows = []
         for code in set(recent) | {c for c, item in watch['stocks'].items() if item['groupIds']}:
             member = watch['stocks'].get(code, {})
@@ -87,7 +118,7 @@ class LiveStockMonitor:
             joined = max((v for v in member.get('groupAddedAt', {}).values() if v is not None), default=0)
             rows.append({'code': code, 'name': member.get('name') or names.get(code, code),
                          'sources': (['自选'] if selected else []) + (['涨停'] if code in recent else []),
-                         'lastLimitDate': recent.get(code), 'joinedAt': joined})
+                         'lastLimitDate': recent.get(code), 'joinedAt': joined, 'theme':themes.get(code) or None})
         rows.sort(key=lambda row: ('自选' not in row['sources'], -row['joinedAt'], -int(row['lastLimitDate'] or 0), row['code']))
         identity = json.dumps([history['dates'], rows], ensure_ascii=False, sort_keys=True)
         roster_id = hashlib.sha256(identity.encode()).hexdigest()[:24]
@@ -203,13 +234,33 @@ class LiveStockMonitor:
         facts = {item['code']: item for item in self.facts([v['code'] for v in page], payload['date'])} if page else {}
         return {**{k: v for k, v in payload.items() if k != 'items'}, 'total': len(payload['items']),
                 'offset': offset, 'nextOffset': offset+len(page), 'hasMore': offset+len(page)<len(payload['items']),
+                'chartBasisVersion':self.r.database_revision((self.r.BASIC_DB,)),
                 'items': [{**item, **facts.get(item['code'], {})} for item in page]}
 
     def _chart(self, code, day, period='all'):
         r = self.r
-        version = r.stock_data_version()['stockDataVersion']
+        basis_version = r.database_revision((r.BASIC_DB,))
+        version = basis_version if period=='oneMin' else r.stock_data_version()['stockDataVersion']
         today = dt.datetime.now(ZONE).strftime('%Y%m%d')
         one_only = period == 'oneMin'
+        record_key = f'live-monitor-series:v3:{period}:{code}:{day}'
+        source_token = None
+        if one_only:
+            import redis
+            client=redis.Redis(port=6380,decode_responses=True,socket_connect_timeout=.5,socket_timeout=2)
+            pipe=client.pipeline(transaction=False)
+            pipe.zrange('online:snapshot:window:'+code,0,0,withscores=True)
+            pipe.zrevrange('online:snapshot:window:'+code,0,0,withscores=True)
+            head,tail=pipe.execute()
+            opening=dt.datetime.strptime(day+'093200','%Y%m%d%H%M%S').replace(tzinfo=ZONE).timestamp()
+            needs_native=day==today and (not head or head[0][1]>opening)
+            now=dt.datetime.now(ZONE);phase=r.live_market_status()['phase']
+            native_epoch=int(time.time()/60) if needs_native and (phase=='trading' or phase=='closed' and now.strftime('%H%M')<'1505') else 0
+            source_token=[basis_version,head[0][1] if head else None,tail[0][1] if tail else None,native_epoch,phase]
+            cached=r.CACHE.get(record_key)
+            if cached and cached.get('token')==source_token:
+                self._remember_series(record_key,cached,write=False)
+                return {**cached['payload'],'cacheSource':'redis' if r.CACHE.redis else 'sqlite'}
         def historical():
             if one_only:
                 # Same-day minute thumbnails only need the raw previous close.
@@ -319,8 +370,20 @@ class LiveStockMonitor:
                     'sources': {'oneMin': 'tdx_native_1min+redis_tick' if native else 'redis_tick_1min' if ticks else 'offline_native_1min' if one else 'unavailable',
                                 'fifteenMin': 'offline_qfq+live_1min_aggregated_15min' if live['today'] else 'offline_qfq', 'daily': 'offline_qfq+live_tick' if live['today'] else 'offline_qfq'},
                     'updatedAt': live.get('quote', {}).get('time') if live.get('quote') else None}
-        payload=r.cached_series(f'live-monitor-chart:v2:{period}:{code}:{day}:{version}', load, 5 if day == today else 300)
-        return {key:value for key,value in payload.items() if key not in ('fifteenMin','daily')} if one_only else payload
+        if one_only:
+            with r._cache_load_locks.hold(record_key):
+                cached=r.CACHE.get(record_key)
+                if cached and cached.get('token')==source_token:
+                    self._remember_series(record_key,cached,write=False)
+                    return {**cached['payload'],'cacheSource':'redis' if r.CACHE.redis else 'sqlite'}
+                payload={key:value for key,value in load().items() if key not in ('fifteenMin','daily')}
+                payload.update(basisVersion=basis_version,cacheSchema=2)
+                if payload['errors'].get('oneMin') and cached and cached.get('payload',{}).get('basisVersion')==basis_version:
+                    return {**cached['payload'],'cacheSource':'last-good','refreshError':payload['errors']['oneMin']}
+                if payload['oneMin'] and not payload['errors'].get('oneMin'):
+                    self._remember_series(record_key,{'token':source_token,'payload':payload})
+                return {**payload,'cacheSource':'source-load'}
+        return r.cached_series(f'live-monitor-chart:v2:{period}:{code}:{day}:{version}', load, 5 if day == today else 300)
 
     def charts(self, codes, day, period='all'):
         if period not in ('all','oneMin'):

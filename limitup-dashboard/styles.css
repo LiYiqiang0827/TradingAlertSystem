@@ -770,22 +770,23 @@ body:has(.ladder-vertical) .topbar{display:none}.content:has(.ladder-vertical){p
 .monitor-list-head{display:flex;gap:10px;align-items:center;padding:6px 8px;border-bottom:1px solid var(--line)}
 .monitor-list-head h2{font:600 12px var(--sans);margin:0}.monitor-list-head small{font:9px var(--sans);color:var(--muted)}
 .live-stock-scroll{height:calc(100dvh - 305px);min-height:220px;overflow:auto;overscroll-behavior:contain;overflow-anchor:none}
-.live-stock-table{--monitor-stock-columns:minmax(74px,.9fr) 54px 52px 54px minmax(110px,1.6fr);width:100%;min-width:730px;font:9px/1.15 var(--sans)}
-.monitor-columns-head{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));position:sticky;top:0;z-index:2;background:var(--paper);border-bottom:1px solid var(--line)}
+.live-stock-table{--monitor-stock-columns:minmax(58px,.85fr) minmax(61px,1fr) 43px 44px 80px;width:100%;min-width:865px;font:8.5px/1.15 var(--sans)}
+.monitor-columns-head{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));position:sticky;top:0;z-index:2;background:var(--paper);border-bottom:1px solid var(--line)}
 .monitor-column-head,.monitor-stock-item{display:grid;grid-template-columns:var(--monitor-stock-columns);align-items:center;min-width:0;box-sizing:border-box}
-.monitor-column-head{height:22px;font:500 9px var(--sans)}
-.monitor-column-head>span{padding:0 5px}.monitor-column-head>span:nth-child(3),.monitor-column-head>span:nth-child(4){text-align:right}
-.monitor-stock-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));align-items:start}
-.monitor-stock-item{height:36px;border-bottom:1px solid var(--line)}
-.monitor-stock-item:nth-child(odd),.monitor-column-head:first-child{border-right:1px solid var(--line)}
-.monitor-stock-item>div{min-width:0;padding:1px 5px;box-sizing:border-box}
-.monitor-stock-item .monitor-name{display:flex;align-items:center;white-space:nowrap;font:600 9.5px var(--sans)}
+.monitor-column-head{height:20px;font:500 8.5px var(--sans)}
+.monitor-column-head>span{padding:0 2px}.monitor-column-head>span:nth-child(3),.monitor-column-head>span:nth-child(4){text-align:right}
+.monitor-stock-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));align-items:start}
+.monitor-stock-item{height:32px;border-bottom:1px solid var(--line)}
+.monitor-stock-item:not(:nth-child(3n)),.monitor-column-head:not(:last-child){border-right:1px solid var(--line)}
+.monitor-stock-item>div{min-width:0;padding:1px 2px;box-sizing:border-box}
+.monitor-stock-item .monitor-name{display:flex;align-items:center;white-space:nowrap;font:600 9px var(--sans)}
 .monitor-name>span{overflow:hidden;text-overflow:ellipsis;min-width:0}.monitor-name .wl-stock-toggle{flex:0 0 11px;width:11px;height:11px;min-width:11px;font-size:7px;margin-left:3px}
 .monitor-sources{display:flex;align-items:center;gap:2px;white-space:nowrap;overflow:hidden}
-.monitor-sources span{display:inline-block;border-radius:2px;border:1px solid #d3ddcf;color:#65775a;background:#f0f3e9;padding:1px 2px;font:8px/1.1 var(--sans)}
-.monitor-stock-item .monitor-number{text-align:right;font:9px var(--mono);white-space:nowrap}
-.monitor-stock-item .monitor-chart-cell{padding:1px 4px}
-.monitor-mini{height:32px;width:100%;min-width:0;background:#0a1111;border-radius:2px;overflow:hidden;display:flex;align-items:center;justify-content:center}
+.monitor-origin{flex:0 0 auto;font:7px var(--sans);color:#829175}
+.monitor-theme{min-width:0;overflow:hidden;text-overflow:ellipsis;font:8.5px var(--sans);color:var(--ink)}
+.monitor-stock-item .monitor-number{text-align:right;font:8.5px var(--mono);white-space:nowrap}
+.monitor-stock-item .monitor-chart-cell{padding:1px 2px}
+.monitor-mini{height:28px;width:100%;min-width:0;background:#0a1111;border-radius:2px;overflow:hidden;display:flex;align-items:center;justify-content:center}
 .monitor-mini>svg{width:100%;height:100%;display:block}.monitor-mini>span{font:8px var(--sans);color:#8a9990}
 .monitor-more{display:block;width:100%;padding:9px;border:0;background:transparent;color:var(--muted);font:9px var(--sans);cursor:pointer}.monitor-more:disabled{cursor:default}
 .monitor-stale{opacity:.6}
