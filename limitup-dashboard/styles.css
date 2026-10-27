@@ -816,3 +816,7 @@ body:has(.ladder-vertical) .topbar{display:none}.content:has(.ladder-vertical){p
 .tracking-stock{border-left:2px solid var(--tracking-theme-color,#708c7a);border-radius:3px;padding-left:3px;background:color-mix(in srgb,var(--tracking-theme-color,#708c7a) 7%,transparent)}
 .tracking-stock .tracking-board{border-color:var(--tracking-theme-color,#708c7a);color:var(--tracking-theme-color,#526d5d)}
 .tracking-stock .tracking-theme{color:var(--tracking-theme-color,var(--muted))}
+
+.tracking-stock-name[data-tracking-stock-preview]{cursor:default;outline-offset:2px}
+.tracking-stock-name[data-tracking-stock-preview]:hover{text-decoration:underline;text-underline-offset:2px}
+.tracking-stock-name[data-tracking-stock-preview]:focus-visible{outline:1px solid var(--tracking-theme-color)}

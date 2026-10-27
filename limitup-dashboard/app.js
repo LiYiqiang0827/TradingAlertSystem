@@ -1227,10 +1227,10 @@
     for(const stock of stocks){const key=stock.date+':'+stock.hoverTier;if(!cells.has(key))cells.set(key,[]);cells.get(key).push(stock);}
     return `<header class="vl-hover-head"><div>${ladderHoverThemeTitle(theme,days.at(-1),true)}<span>${esc(fmtDate(days[0]))}—${esc(fmtDate(days.at(-1)))} · ${days.length}日</span></div></header><div class="vl-hover-scroll"><table><colgroup><col style="width:30px"/>${days.map(()=>'<col/>').join('')}</colgroup><thead><tr><th>板数</th>${days.map(day=>`<th>${day.slice(4,6)}/${day.slice(6)}</th>`).join('')}</tr></thead><tbody>${tiers.map(tier=>`<tr><th scope="row">${tier.label}</th>${days.map(day=>{const members=(cells.get(day+':'+tier.level)||[]).sort((a,b)=>(a.status==='sealed'?0:1)-(b.status==='sealed'?0:1)||Number(b.board||b.previousBoard||0)-Number(a.board||a.previousBoard||0)||(a.time||'99:99:99').localeCompare(b.time||'99:99:99')||a.name.localeCompare(b.name,'zh-CN'));return `<td>${members.length?members.map(stock=>`<span class="wl-stock-pair"><button type="button" class="vl-hover-stock" data-vl-range-hover-stock="${esc(stock.id)}" title="${esc(stock.name+' · '+fmtDate(stock.date)+' · '+(stock.status==='sealed'?stock.boardPeriod:stock.status==='unpromoted'?'未晋级':'破板'))}">${stock.status==='sealed'?ladderHoverBoardBadge(stock):ladderHoverOutcomeBadge(stock)}<span data-vl-stock-preview="${esc(stock.id)}"${isLadderGrowthStock(stock.code)?' class="vl-hover-growth-name"':''}>${esc(stock.name)}</span></button>${Watchlists.button(stock)}</span>`).join(''):'<span class="vl-range-empty">—</span>'}</td>`;}).join('')}</tr>`).join('')}</tbody></table></div>`;
   }
-  let ladderStockHover=null,ladderStockHoverContext=null;
+  let ladderStockHover=null,ladderStockHoverContext=null,trackingStockHoverContext=null,trackingPendingPayload=null;
   let ladderShowLatest=localStorage.getItem('ladderShowLatest')==='true';
   const ladderStockHoverRequests=new Map();
-  const ladderStockPreviewSelector='#ladderLegend .vl-legend-stock-name[data-vl-stock-preview],#ladderChart [data-vl-stock-link],#ladderChart [data-vl-unpromoted-link],#ladderChart [data-vl-broken-link],#ladderTopicHover [data-vl-stock-preview],#ladderNestedThemeHover [data-vl-stock-preview]';
+  const ladderStockPreviewSelector='#ladderLegend .vl-legend-stock-name[data-vl-stock-preview],#ladderChart [data-vl-stock-link],#ladderChart [data-vl-unpromoted-link],#ladderChart [data-vl-broken-link],#ladderTopicHover [data-vl-stock-preview],#ladderNestedThemeHover [data-vl-stock-preview],#limitupTrackingContent [data-tracking-stock-preview]';
   function flushPendingLiveLadder(){
     const view=ladderView;if(!view?.live||!view.pendingPaint)return;
     requestAnimationFrame(()=>{if(ladderView===view&&view.pendingPaint&&!view.dragging&&history.state?.view==='ladder'&&(!ladderStockHover||ladderStockHover.card.hidden)&&(!ladderTopicHover||ladderTopicHover.card.hidden)&&(!indexHover||indexHover.card.hidden))rebuildVerticalLadder(view);});
@@ -1240,7 +1240,7 @@
   }
 
   const hoverSeriesCache=new WeakMap(),hoverChartPool=new Map();let hoverPoolTimer=0,hoverParking=null;
-  function hoverPoolKey(kind,code,date){return kind+':'+date+':'+code+(kind==='stock'&&ladderShowLatest?':forward':'');}
+  function hoverPoolKey(kind,code,date,showLatest=ladderShowLatest){return kind+':'+date+':'+code+(kind==='stock'&&showLatest?':forward':'');}
   function disposeHoverRecord(record){for(const id of record.ids)try{window.klinecharts.dispose(id);}catch{}record.node.remove();}
   function pruneHoverChartPool(){
     clearTimeout(hoverPoolTimer);const now=Date.now();for(const [key,record] of hoverChartPool)if(record.deadline<=now){disposeHoverRecord(record);hoverChartPool.delete(key);}
@@ -1267,13 +1267,13 @@
     else{delete hover.card.dataset.previousSnapshot;delete hover.card.dataset.refreshError;hover.card.title='';}
   }
   function mountHoverCharts(hover,payload,date,identity,info,isIndex=false){
-    const {daily,days,specs}=hoverChartSeries(payload,date),key=hoverPoolKey(isIndex?'index':'stock',identity,date),warm=takeHoverCharts(key,payload),prefix=(isIndex?'index-preview-':'ladder-stock-preview-')+hover.requestId+'-';
+    const {daily,days,specs}=hoverChartSeries(payload,date),key=hoverPoolKey(isIndex?'index':'stock',identity,date,hover.showLatest??ladderShowLatest)+(hover.poolSuffix||''),warm=takeHoverCharts(key,payload),prefix=(isIndex?'index-preview-':'ladder-stock-preview-')+hover.requestId+'-';
     hover.cacheKey=key;hover.identity=identity;hover.isIndex=isIndex;hover.card.innerHTML='<div class="vl-stock-preview-info">'+info+'</div>';hover.card.dataset.chartReused=String(Boolean(warm));
     if(warm){hover.card.append(warm.node);hover.chartIds=warm.ids;hover.charts=warm.charts;hover.entries=warm.entries;hover.lastSignature=warm.signature;hover.lastPayload=warm.payload;}
     else{
       hover.card.insertAdjacentHTML('beforeend',`<div class="vl-stock-preview-charts">${specs.map(([period,title,bars])=>`<section class="vl-stock-preview-chart ${period==='oneMin'?'vl-stock-preview-wide':''}"><h4${period==='daily'&&hover.stock?' class="vl-stock-preview-daily-heading"':''}>${title}${period==='daily'&&hover.stock?ladderStockDailyQuote(hover.stock,payload,bars):`<span>${period==='oneMin'?days.length+'日':bars.length+'根'}</span>`}</h4><div id="${prefix+period}" class="vl-stock-preview-mount" data-preview-period="${period}" data-preview-bars="${bars.length}" data-preview-last-day="${bars.length?chartDayKey(bars.at(-1)):''}"></div></section>`).join('')}</div>`);
       hover.entries=new Map();positionLadderStockHover(hover.anchor,hover.card);
-      for(const [period,,bars] of specs){const id=prefix+period;hover.chartIds.push(id);const chart=drawChart(id,bars,period,identity,date,daily,payload.suspendedDays||[],{compact:true,detached:true,line:period==='oneMin',minBarSpace:.1,endAtLatest:true,showReferenceWindow:payload.chartWindow?.mode==='latest',isIndex,liveSession:payload.isLive&&period==='oneMin'});if(chart){hover.charts.push(chart);hover.entries.set(period,{id,chart});}}
+      for(const [period,,bars] of specs){const id=prefix+period;hover.chartIds.push(id);const chart=drawChart(id,bars,period,identity,date,daily,payload.suspendedDays||[],{compact:true,detached:true,line:period==='oneMin',minBarSpace:.1,endAtLatest:true,showReferenceWindow:payload.chartWindow?.mode==='latest',minVisibleDate:period==='daily'?hover.minimumDailyDate:'',isIndex,liveSession:payload.isLive&&period==='oneMin'});if(chart){hover.charts.push(chart);hover.entries.set(period,{id,chart});}}
       hover.lastSignature=hoverPayloadSignature(payload);hover.lastPayload=payload;
     }
     positionLadderStockHover(hover.anchor,hover.card);if(warm){updateHoverCharts(hover,payload,date);for(const [period,entry] of hover.entries){const view=warm.viewport.get(period);entry.chart.resize();if(view?.space>0)entry.chart.setBarSpace(view.space);entry.chart.setOffsetRightDistance(0);entry.chart.scrollToRealTime(0);}}
@@ -1292,7 +1292,7 @@
       let entry=hover.entries?.get(key);
       if(!entry&&bars.length){
         const mount=hover.card.querySelector('[data-preview-period="'+key+'"]');if(!mount)continue;mount.replaceChildren();
-        const chart=drawChart(mount.id,bars,key,hover.identity,date,series.daily,payload.suspendedDays||[],{compact:true,detached:true,line:key==='oneMin',minBarSpace:.1,endAtLatest:true,showReferenceWindow:payload.chartWindow?.mode==='latest',isIndex:hover.isIndex,liveSession:payload.isLive&&key==='oneMin'});
+        const chart=drawChart(mount.id,bars,key,hover.identity,date,series.daily,payload.suspendedDays||[],{compact:true,detached:true,line:key==='oneMin',minBarSpace:.1,endAtLatest:true,showReferenceWindow:payload.chartWindow?.mode==='latest',minVisibleDate:key==='daily'?hover.minimumDailyDate:'',isIndex:hover.isIndex,liveSession:payload.isLive&&key==='oneMin'});
         if(chart){entry={id:mount.id,chart};hover.entries.set(key,entry);hover.charts.push(chart);}
       }
       if(!entry)continue;
@@ -1308,7 +1308,7 @@
   }
   function closeLadderStockHover(){if(Watchlists.isOpen)return;
     const hover=ladderStockHover;if(!hover)return;clearTimeout(hover.showTimer);clearTimeout(hover.hideTimer);clearTimeout(hover.liveTimer);hover.liveRefresh=null;hover.liveRefreshPending=false;hover.requestId++;hover.anchor=null;hover.resizeObserver?.disconnect();hover.resizeObserver=null;
-    parkHoverCharts(hover);hover.card.hidden=true;hover.entries=null;hover.stock=null;hover.chartIds=[];hover.charts=[];hover.lastPayload=null;hover.lastSignature='';hover.cacheKey='';hover.card.replaceChildren();flushPendingLiveLadder();
+    parkHoverCharts(hover);hover.card.hidden=true;hover.entries=null;hover.stock=null;hover.chartIds=[];hover.charts=[];hover.lastPayload=null;hover.lastSignature='';hover.cacheKey='';hover.card.replaceChildren();flushPendingLiveLadder();flushPendingTrackingHover();
   }
   function positionLadderStockHover(anchor,card){
     const zoom=parseFloat(getComputedStyle(document.documentElement).zoom)||1,margin=10;
@@ -1324,10 +1324,10 @@
     }else y=Math.max(margin,Math.min(box.top-margin,window.innerHeight-size.height-margin));
     card.style.left=x/zoom+'px';card.style.top=Math.max(margin,y)/zoom+'px';
   }
-  async function getLadderStockChartData(stock,{force=false,historicalOnly=false}={}){
+  async function getLadderStockChartData(stock,{force=false,historicalOnly=false,showLatest=ladderShowLatest}={}){
     const code=canonicalStockCode(stock.code),date=stock.date,key=date+':'+code;
     if(date!==shanghaiDateKey()){
-      if(!ladderShowLatest||historicalOnly)return getStockPreview(code,date);
+      if(!showLatest||historicalOnly)return getStockPreview(code,date);
       const preview=await getStockPreview(code,date,true);
       // Keep facts and chart anchors on the review day; only append available
       // current-day bars, bounded independently for each requested timeframe.
@@ -1365,7 +1365,7 @@
     let period=typeof raw==='string'&&!/undefined|null|NaN/.test(raw)?raw.trim():'';
     if(period==='首板')period='1板';period=period.replace(/连板$/, '板');
     if(!period)period=Number.isFinite(count)&&count>0?count+'板':'—板';
-    return previous?'未晋级 · 昨'+period:stock.status==='broken'?'破板':period;
+    return previous?'未晋级 · 昨'+period:stock.status==='broken'?'破板':stock.historicalBoard?'此前'+period:period;
   }
   function ladderStockPreviewTraits(stock){
     if(stock.status!=='sealed')return '';
@@ -1387,42 +1387,66 @@
     return `<span class="vl-daily-quote" aria-label="日K行情">${items.map(([label,value,title])=>`<span class="vl-daily-stat" title="${esc(title+'：'+value)}">${label==='日期'?'':`<i>${label}</i>`}<b${label==='幅'&&pct!=null?` class="${Number(pct)>0?'pct-up':Number(pct)<0?'pct-down':''}"`:''}>${esc(value)}</b></span>`).join('')}</span>`;
   }
   function ladderStockHoverRecord(context,anchor){
-    const id=anchor.dataset.vlStockLink||anchor.dataset.vlUnpromotedLink||anchor.dataset.vlBrokenLink||anchor.dataset.vlStockPreview;
+    const id=anchor.dataset.vlStockLink||anchor.dataset.vlUnpromotedLink||anchor.dataset.vlBrokenLink||anchor.dataset.vlStockPreview||anchor.dataset.trackingStockPreview;
     // The selected-day legend may contain a date outside the loaded chart window.
     const stock=(anchor.closest('#ladderLegend')?context.view.legendStockRecords?.get(id):null)||context.stocks.get(id);if(stock)return stock;
     const [date,code]=String(id||'').split(':'),prior=[...context.stocks.values()].filter(stock=>stock.code===code&&stock.date<=date).sort((a,b)=>b.date.localeCompare(a.date))[0];
     if(!prior)return null;const failed=/:(?:unpromoted|failed)$/.test(id);
     return {...prior,id,date,name:anchor.textContent.trim(),status:failed?'unpromoted':prior.status,...(failed?{previousBoard:prior.board,previousBoardPeriod:prior.boardPeriod}:{})};
   }
+  function trackingDailyStart(stock){
+    const date=stock.chartLimitDate||stock.limitDate||stock.date;
+    const month=new Date(Date.UTC(Number(date.slice(0,4)),Number(date.slice(4,6))-4,1));
+    const last=new Date(Date.UTC(month.getUTCFullYear(),month.getUTCMonth()+1,0)).getUTCDate();
+    return String(month.getUTCFullYear())+String(month.getUTCMonth()+1).padStart(2,'0')+String(Math.min(Number(date.slice(6,8)),last)).padStart(2,'0');
+  }
+  function resolveStockHoverContext(anchor){
+    return anchor.closest('#limitupTrackingContent')?trackingStockHoverContext:ladderStockHoverContext;
+  }
+  function stockHoverContextCurrent(context,anchor){
+    if(!context||!anchor.isConnected)return false;
+    if(context.mode==='tracking')return history.state?.view==='tracking'&&trackingStockHoverContext===context&&state.date===context.date;
+    return history.state?.view==='ladder'&&ladderView===context.view&&!context.view.dragging&&context.view.data===context.fullData;
+  }
+  function flushPendingTrackingHover(){
+    if(!trackingPendingPayload)return;
+    queueMicrotask(()=>{
+      if(!trackingPendingPayload)return;
+      if(history.state?.view!=='tracking'||trackingPendingPayload.date!==state.date){trackingPendingPayload=null;return;}
+      if(Watchlists.isOpen||ladderStockHover&&!ladderStockHover.card.hidden)return;
+      const payload=trackingPendingPayload;trackingPendingPayload=null;renderTrackingTables(payload);
+    });
+  }
   async function showLadderStockHover(anchor){
     if(Watchlists.isOpen)return;
-    const context=ladderStockHoverContext;if(!context||ladderView!==context.view||context.view.dragging||context.view.data!==context.fullData||history.state?.view!=='ladder'||!anchor.isConnected)return;
+    const context=resolveStockHoverContext(anchor);if(!stockHoverContextCurrent(context,anchor))return;
+    const showLatest=context.mode==='tracking'?false:ladderShowLatest;
     const stock=ladderStockHoverRecord(context,anchor);
     if(!stock)return;const fromRoster=Boolean(anchor.closest('#ladderTopicHover,#ladderNestedThemeHover'));
     if(!fromRoster)closeLadderTopicHover();else{if(ladderTopicHover)clearTimeout(ladderTopicHover.hideTimer);if(ladderNestedThemeHover)clearTimeout(ladderNestedThemeHover.hideTimer);}
-    const hover=ensureLadderStockHover();closeLadderStockHover();hover.anchor=anchor;const requestId=++hover.requestId,loadStarted=performance.now();
+    const hover=ensureLadderStockHover();closeLadderStockHover();hover.anchor=anchor;hover.showLatest=showLatest;hover.minimumDailyDate=context.mode==='tracking'?trackingDailyStart(stock):'';hover.poolSuffix=hover.minimumDailyDate?':tracking:'+hover.minimumDailyDate:'';const requestId=++hover.requestId,loadStarted=performance.now();
     hover.card.setAttribute('aria-label',stock.name+' · 基本信息与行情');hover.card.dataset.stock=stock.code;hover.card.dataset.date=stock.date;for(const field of ['cacheSource','loadMs','renderMs','chartReused','dailyReadyMs','dailyPreloaded'])delete hover.card.dataset[field];hover.card.innerHTML=ladderStockPreviewInfo(stock,null)+'<div class="vl-stock-preview-loading" aria-live="polite">正在读取行情…</div>';hover.card.hidden=false;positionLadderStockHover(anchor,hover.card);
     let complete=false;
     // Show already-preloaded daily bars while native minute requests finish.
-    if(!ladderShowLatest&&!hoverChartPool.has(hoverPoolKey('stock',stock.code,stock.date)))readDailyPreview(stock.code,stock.date).then(preview=>{
-      if(!preview||complete||requestId!==hover.requestId||hover.anchor!==anchor||!anchor.isConnected)return;
+    if(!showLatest&&!hoverChartPool.has(hoverPoolKey('stock',stock.code,stock.date,showLatest)+hover.poolSuffix))readDailyPreview(stock.code,stock.date).then(preview=>{
+      if(!preview||complete||requestId!==hover.requestId||hover.anchor!==anchor||!stockHoverContextCurrent(context,anchor))return;
       hover.stock=stock;mountHoverCharts(hover,preview,stock.date,stock.code,ladderStockPreviewInfo(stock,null));
       hover.card.dataset.dailyReadyMs=(performance.now()-loadStarted).toFixed(1);hover.card.dataset.dailyPreloaded='true';
       for(const mount of hover.card.querySelectorAll('[data-preview-period]'))if(mount.dataset.previewPeriod!=='daily')mount.innerHTML='<div class="empty-state">正在读取分钟行情…</div>';
     }).catch(()=>{});
     try{
-      const [chartData,facts]=await Promise.all([getLadderStockChartData(stock),(stock.date===shanghaiDateKey()?Promise.resolve(null):getLadderStockFacts(stock,context.view.dataVersion)).catch(error=>{console.warn('个股基本信息读取失败',error);return null;})]),payload=chartData.isLive||chartData.previewFacts===facts||marketCacheSources.get(chartData)?.notice&&chartData.previewFacts?chartData:{...chartData,previewFacts:facts,previewFactsVersion:facts?.stockFactsVersion||stockMeta?.stockFactsVersion};if(!chartData.isLive&&payload!==chartData&&facts&&!marketCacheSources.get(chartData)?.notice){if(payload.previewVersion===1)saveStockPreview(canonicalStockCode(stock.code),stock.date,payload);else saveStockCache(canonicalStockCode(stock.code),stock.date,payload);}hover.card.dataset.cacheSource=marketCacheSources.get(chartData)?.source||'network';hover.card.dataset.loadMs=(performance.now()-loadStarted).toFixed(1);complete=true;if(requestId!==hover.requestId||hover.anchor!==anchor||ladderView!==context.view||!anchor.isConnected||history.state?.view!=='ladder')return;
+      const [chartData,facts]=await Promise.all([getLadderStockChartData(stock,{showLatest}),(stock.date===shanghaiDateKey()?Promise.resolve(null):getLadderStockFacts(stock,context.dataVersion||context.view?.dataVersion)).catch(error=>{console.warn('个股基本信息读取失败',error);return null;})]),payload=chartData.isLive||chartData.previewFacts===facts||marketCacheSources.get(chartData)?.notice&&chartData.previewFacts?chartData:{...chartData,previewFacts:facts,previewFactsVersion:facts?.stockFactsVersion||stockMeta?.stockFactsVersion};if(!chartData.isLive&&payload!==chartData&&facts&&!marketCacheSources.get(chartData)?.notice){if(payload.previewVersion===1)saveStockPreview(canonicalStockCode(stock.code),stock.date,payload);else saveStockCache(canonicalStockCode(stock.code),stock.date,payload);}hover.card.dataset.cacheSource=marketCacheSources.get(chartData)?.source||'network';hover.card.dataset.loadMs=(performance.now()-loadStarted).toFixed(1);complete=true;if(requestId!==hover.requestId||hover.anchor!==anchor||!stockHoverContextCurrent(context,anchor))return;
       const renderStarted=performance.now();hover.stock=stock;if(hover.entries?.size){hover.card.querySelector('.vl-stock-preview-info').innerHTML=ladderStockPreviewInfo(stock,payload);updateHoverCharts(hover,payload,stock.date);}else mountHoverCharts(hover,payload,stock.date,stock.code,ladderStockPreviewInfo(stock,payload));hover.card.dataset.renderMs=(performance.now()-renderStarted).toFixed(1);applyHoverCacheNote(hover,marketCacheSources.get(chartData));
       if(payload.isLive)scheduleLiveHoverRefresh(hover,async()=>{
-        const next=await getLadderStockChartData(stock,{force:true});
-        if(requestId!==hover.requestId||hover.anchor!==anchor||!anchor.isConnected||ladderView!==context.view||history.state?.view!=='ladder')return;
+        const next=await getLadderStockChartData(stock,{force:true,showLatest});
+        if(requestId!==hover.requestId||hover.anchor!==anchor||!stockHoverContextCurrent(context,anchor))return;
         if(!next.isLive)return;
         hover.card.querySelector('.vl-stock-preview-info').innerHTML=ladderStockPreviewInfo(stock,next);applyHoverCacheNote(hover,marketCacheSources.get(next));updateHoverCharts(hover,next,stock.date);
       });
       hover.resizeObserver=new ResizeObserver(()=>{if(!hover.card.hidden)for(const chart of hover.charts){chart.resize();chart.setOffsetRightDistance(0);chart.scrollToRealTime(0);}});hover.resizeObserver.observe(hover.card);
       document.documentElement.dataset.stockMemoryCount=String(stockMemoryCache.size);document.documentElement.dataset.stockMemoryBytes=String(stockMemoryCache.bytes);document.documentElement.dataset.liveStockMemoryCount=String(liveStockMemoryCache.size);
       if(payload.isLive&&marketCacheSources.get(chartData)?.refresh)queueMicrotask(()=>{if(requestId===hover.requestId&&!hover.card.hidden)refreshPushedHover(hover);});
-    }catch(error){complete=true;if(requestId!==hover.requestId||hover.anchor!==anchor)return;for(const id of hover.chartIds)try{window.klinecharts.dispose(id);}catch{}hover.chartIds=[];hover.charts=[];hover.entries=null;for(const field of ['cacheSource','loadMs','renderMs','chartReused','dailyReadyMs','dailyPreloaded'])delete hover.card.dataset[field];hover.card.innerHTML=ladderStockPreviewInfo(stock,null)+'<div class="vl-stock-preview-loading">行情读取失败：'+esc(error.message)+'</div>';positionLadderStockHover(anchor,hover.card);}
+    }catch(error){complete=true;if(requestId!==hover.requestId||hover.anchor!==anchor||!stockHoverContextCurrent(context,anchor))return;for(const id of hover.chartIds)try{window.klinecharts.dispose(id);}catch{}hover.chartIds=[];hover.charts=[];hover.entries=null;for(const field of ['cacheSource','loadMs','renderMs','chartReused','dailyReadyMs','dailyPreloaded'])delete hover.card.dataset[field];hover.card.innerHTML=ladderStockPreviewInfo(stock,null)+'<div class="vl-stock-preview-loading">行情读取失败：'+esc(error.message)+'</div>';positionLadderStockHover(anchor,hover.card);}
   }
   function ensureLadderStockHover(){
     if(ladderStockHover)return ladderStockHover;
@@ -1431,7 +1455,7 @@
     const scheduleHide=()=>{clearTimeout(hover.hideTimer);hover.hideTimer=setTimeout(closeLadderStockHover,180);};
     card.addEventListener('pointerenter',()=>{clearTimeout(hover.hideTimer);if(ladderTopicHover)clearTimeout(ladderTopicHover.hideTimer);if(ladderNestedThemeHover)clearTimeout(ladderNestedThemeHover.hideTimer);});
     card.addEventListener('pointerleave',event=>{if(hover.anchor?.contains(event.relatedTarget))return;scheduleHide();if(ladderTopicHover&&!ladderTopicHover.card.contains(event.relatedTarget)&&!ladderNestedThemeHover?.card.contains(event.relatedTarget))ladderTopicHover.hideTimer=setTimeout(closeLadderTopicHover,200);});
-    document.addEventListener('pointerover',event=>{const anchor=event.target.closest(ladderStockPreviewSelector);if(!anchor||anchor.contains(event.relatedTarget))return;clearTimeout(hover.showTimer);clearTimeout(hover.hideTimer);if(ladderTopicHover)clearTimeout(ladderTopicHover.hideTimer);if(ladderNestedThemeHover)clearTimeout(ladderNestedThemeHover.hideTimer);if(hover.anchor===anchor&&!card.hidden)return;const stock=ladderStockHoverContext&&ladderStockHoverRecord(ladderStockHoverContext,anchor),key=stock&&hoverPoolKey('stock',stock.code,stock.date);hover.showTimer=setTimeout(()=>showLadderStockHover(anchor),key&&hoverChartPool.has(key)?100:280);});
+    document.addEventListener('pointerover',event=>{const anchor=event.target.closest(ladderStockPreviewSelector);if(!anchor||anchor.contains(event.relatedTarget))return;clearTimeout(hover.showTimer);clearTimeout(hover.hideTimer);if(ladderTopicHover)clearTimeout(ladderTopicHover.hideTimer);if(ladderNestedThemeHover)clearTimeout(ladderNestedThemeHover.hideTimer);if(hover.anchor===anchor&&!card.hidden)return;const context=resolveStockHoverContext(anchor),stock=context&&ladderStockHoverRecord(context,anchor),key=stock&&hoverPoolKey('stock',stock.code,stock.date,context?.mode==='tracking'?false:ladderShowLatest)+(context?.mode==='tracking'?':tracking:'+trackingDailyStart(stock):'');hover.showTimer=setTimeout(()=>showLadderStockHover(anchor),key&&hoverChartPool.has(key)?100:280);});
     document.addEventListener('pointerout',event=>{const anchor=event.target.closest(ladderStockPreviewSelector);if(!anchor||anchor.contains(event.relatedTarget))return;clearTimeout(hover.showTimer);if(card.contains(event.relatedTarget))return;scheduleHide();});
     document.addEventListener('focusin',event=>{const anchor=event.target.closest(ladderStockPreviewSelector);if(anchor)showLadderStockHover(anchor);});
     document.addEventListener('keydown',event=>{if(event.key==='Escape'&&!card.hidden){event.preventDefault();closeLadderStockHover();}},true);
@@ -2476,7 +2500,7 @@
   function trackingStockCard(stock,key,date){
     const target=stock.signals?.[key],note=key.startsWith('return')?`前次 ${fmtDate(stock.priorLimitDate)} · ${stock.priorBoard}板 · 间隔${stock.returnGap}交易日`:key==='fresh_break'?`昨日 ${stock.boardPeriod}`:target!=null?`目标价 ${Number(target).toFixed(2)}${key==='origin'?' · 起涨日 '+fmtDate(stock.originDate):''}`:`涨停日 ${fmtDate(stock.limitDate)}`;
     const repeat=key.startsWith('return'),badge=repeat?{...stock,board:stock.priorBoard,boardPeriod:stock.priorBoardPeriod||stock.priorBoard+'板',currentBoard:false}:stock,theme=repeat?(stock.priorTheme||stock.theme):stock.theme;
-    return `<article class="tracking-stock" style="--tracking-theme-color:${esc(ladderThemeColor(theme))}" data-tracking-theme="${esc(theme)}" data-tracking-code="${esc(stock.code)}" title="${esc(stock.code+' · '+note)}"><div class="tracking-stock-copy"><div class="tracking-name-row">${trackingBadge(badge)}<span class="tracking-stock-name${isLadderGrowthStock(stock.code)?' growth':''}">${esc(stock.name)}</span></div><span class="tracking-theme" title="${esc(theme+' · '+fmtDate(repeat?stock.priorLimitDate:stock.limitDate))}">${esc(theme)}</span></div><div class="tracking-mini" data-tracking-mini="${esc(stock.code)}" aria-label="${esc(stock.name+'最近20日K线')}" data-date="${date}"></div></article>`;
+    return `<article class="tracking-stock" style="--tracking-theme-color:${esc(ladderThemeColor(theme))}" data-tracking-theme="${esc(theme)}" data-tracking-code="${esc(stock.code)}" title="${esc(stock.code+' · '+note)}"><div class="tracking-stock-copy"><div class="tracking-name-row">${trackingBadge(badge)}<span tabindex="0" data-tracking-stock-preview="${esc(date+':'+stock.code+':'+key)}" class="tracking-stock-name${isLadderGrowthStock(stock.code)?' growth':''}">${esc(stock.name)}</span></div><span class="tracking-theme" title="${esc(theme+' · '+fmtDate(repeat?stock.priorLimitDate:stock.limitDate))}">${esc(theme)}</span></div><div class="tracking-mini" data-tracking-mini="${esc(stock.code)}" aria-label="${esc(stock.name+'最近20日K线')}" data-date="${date}"></div></article>`;
   }
   function renderTrackingTables(payload){
     const host=$('#limitupTrackingContent');if(!host)return;
@@ -2486,7 +2510,21 @@
       return `<section class="tracking-section"><h2>${title}</h2><div class="tracking-table-scroll"><table class="tracking-table" style="--tracking-columns:${columns.length}"><thead><tr>${columns.map(c=>`<th scope="col" title="${esc(descriptions[c.key]+'；按当时连板高度降序')}">${esc(c.title)}<small>${c.codes.length}</small></th>`).join('')}</tr></thead><tbody>${Array.from({length:Math.max(1,height)},(_,i)=>`<tr>${columns.map(c=>`<td>${c.codes[i]?trackingStockCard(payload.stocks[c.codes[i]],c.key,payload.date):i===0?'<span class="tracking-empty">—</span>':''}</td>`).join('')}</tr>`).join('')}</tbody></table></div></section>`;
     };
     const signature=JSON.stringify([payload.date,payload.top,payload.bottom,payload.stocks]);
-    if(trackingTableSignatures.get(host)===signature)return;trackingTableSignatures.set(host,signature);
+    if(trackingTableSignatures.get(host)===signature)return;
+    // Keep the hovered row mounted while pushed quotes update the tracking tables.
+    if(ladderStockHover&&!ladderStockHover.card.hidden&&host.contains(ladderStockHover.anchor)){
+      trackingPendingPayload=payload;return;
+    }
+    trackingTableSignatures.set(host,signature);
+    const stocks=new Map();
+    for(const column of [...payload.top,...payload.bottom])for(const code of column.codes){
+      const item=payload.stocks[code],repeat=column.key.startsWith('return'),id=payload.date+':'+code+':'+column.key;
+      const board=repeat?item.priorBoard:item.board,period=repeat?(item.priorBoardPeriod||board+'板'):item.boardPeriod;
+      stocks.set(id,{...item,id,date:payload.date,theme:repeat?(item.priorTheme||item.theme):item.theme,board,boardPeriod:period,
+        chartLimitDate:repeat?item.priorLimitDate:(item.originDate||item.limitDate),historicalBoard:repeat||!item.currentBoard,status:column.key==='fresh_break'?'unpromoted':repeat||!item.currentBoard?'historical':'sealed',
+        previousBoard:item.board,previousBoardPeriod:item.boardPeriod});
+    }
+    trackingStockHoverContext={mode:'tracking',date:payload.date,dataVersion:payload.dataVersion,stocks};ensureLadderStockHover();
     host.innerHTML=table('当日或者昨日涨停类',payload.top)+table('非当日涨停类',payload.bottom);
     const meta=$('#trackingMeta');if(meta)meta.textContent=`近30个交易日 · ${payload.screenedCount}股${payload.missingDailyCount?' · '+payload.missingDailyCount+'股缺当日行情':''}`;
     host.dataset.date=payload.date;host.dataset.source=payload.source;host.dataset.calculationMs=payload.calculationMs;host.dataset.dataVersion=payload.dataVersion;
@@ -2683,6 +2721,10 @@
           const marker=key==='weekly'||key==='monthly'?periodMarker:data.filter(bar=>inChartPeriod(chartDayKey(bar),anchor,key)).at(-1);
           if(marker)chart.createOverlay({name:'verticalStraightLine',id:'selected-limitup-date-'+key,groupId:'selected-limitup-date',paneId:'candle_pane',lock:true,needDefaultPointFigure:false,needDefaultXAxisFigure:true,needDefaultYAxisFigure:false,points:[{timestamp:marker.timestamp}],styles:{line:{color:'#f0c451',size:.8,style:'dashed',dashedValue:[4,3]}}});
         }
+      }
+      if(options.minVisibleDate&&key==='daily'){
+        const start=data.findIndex(bar=>chartDayKey(bar)>=options.minVisibleDate);
+        if(start>=0){chart.setLayoutOptions({barSpaceLimit:{min:.1,max:50}});chart.setBarSpace(Math.max(.1,Math.min(chart.getBarSpace().bar,(host.clientWidth-110)/(data.length-start+5))));host.dataset.minimumVisibleDate=options.minVisibleDate;}
       }
       if(options.showReferenceWindow&&['daily','fifteenMin'].includes(key)){
         const anchorIndex=data.findIndex(bar=>chartDayKey(bar)===String(analysisDate).replaceAll('-',''));

@@ -35,7 +35,7 @@ class LimitupTracking:
         live = live if live.get('available') and live.get('date') == day else {}
         revision = r.database_revision((r.BASIC_DB, r.KPL_DB, r.DBROOT/'offline/limitup_ladder.db'))
         signature = live.get('revision', '')
-        return r.cached_series(f'limitup-tracking:v5:{day}:{revision}:{signature}',
+        return r.cached_series(f'limitup-tracking:v6:{day}:{revision}:{signature}',
                                lambda:self._calculate(day, dates, live, revision), 10 if live else 300)
 
     def _events(self, dates, live):
@@ -166,11 +166,15 @@ class LimitupTracking:
                 if len(bars)<period:continue
                 target = sum(b['close'] for b in bars[-period:])/period
                 member['signals']['ma'+str(period)] = target
-                if current['low']<=target<=current['high']:groups['ma'+str(period)].append(code)
             first = next((b for b in bars if b['date']==origin_day), None)
             target = (first['close'] if len(chain)>1 or board>=2 else first['previous']) if first else None
             member['signals']['origin'] = target
-            if target is not None and current['low']<=target<=current['high']:groups['origin'].append(code)
+            # Exclusive first match in the same order as the table's columns.
+            for key, _ in BOTTOM:
+                target = member['signals'].get(key)
+                if target is not None and current['low']<=target<=current['high']:
+                    groups[key].append(code)
+                    break
         used = set(code for values in groups.values() for code in values)
         for key, values in groups.items():
             values.sort(key=lambda code:(-(stocks[code].get('priorBoard',stocks[code]['board']) if key.startswith('return') else stocks[code]['board']), -int(stocks[code]['limitDate']), stocks[code]['name']))
@@ -180,7 +184,7 @@ class LimitupTracking:
                 'stocks':{code:stocks[code] for code in used}, 'screenedCount':len(codes), 'missingDailyCount':len(missing),
                 'source':'online+offline' if live else 'offline', 'updatedAt':live.get('updatedAt'),
                 'dataVersion':revision, **self.r.stock_data_version(), 'calculationMs':round((time.perf_counter()-began)*1000,1),
-                'rules':{'touch':'low <= target <= high', 'relimitGap':'intervening exchange sessions, buckets 1-5/6-10/11-20/21-30', 'origin':'multi-board first limit close; single-board preceding close'}}
+                'rules':{'pullbackPriority':[key for key,_ in BOTTOM], 'pullbackExclusive':True, 'touch':'low <= target <= high', 'relimitGap':'intervening exchange sessions, buckets 1-5/6-10/11-20/21-30', 'origin':'multi-board first limit close; single-board preceding close'}}
 
     def _short_events(self, dates, live):
         payload = self.r.limitup_ladder_data(dates[-1], min(62,len(dates)), live or None)
