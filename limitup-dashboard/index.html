@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="theme-color" content="#111a20"><title>涨停研究台 · TradingAlert</title>
-    <link rel="stylesheet" href="/styles.css?v=20261027-ladder-v416-multi-hover">
+    <link rel="stylesheet" href="/styles.css?v=20261028-condition-canvas-v5">
 </head>
 <body>
 <div class="app-shell">
@@ -15,7 +15,8 @@
       <button id="liveDataToggle" class="live-data-toggle" type="button" role="switch" aria-checked="false" aria-label="启用实时数据" disabled><span class="live-switch-track" aria-hidden="true"><i></i></span><span>实时数据</span></button>
     </div>
     <div id="liveNav" class="live-nav" hidden>
-      <button id="liveMonitorLink" class="topic-button overview-nav-button" type="button"><span class="overview-nav-icon">实</span><span class="topic-label">实时监控</span></button>
+      <button id="conditionMonitorLink" class="topic-button overview-nav-button cm-nav-link" type="button" hidden><span class="overview-nav-icon">监</span><span class="topic-label">实时监控</span></button>
+      <button id="liveMonitorLink" class="topic-button overview-nav-button cm-old-nav" type="button" hidden><span class="overview-nav-icon">实</span><span class="topic-label">实时监控（旧）</span></button>
     </div>
     <nav id="topicNav" class="topic-nav" aria-label="主导航"></nav>
     <div class="side-bottom"><span class="status-dot"></span><span id="dataSourceLabel">正在连接数据</span><button id="databaseButton" type="button" title="数据库状态" aria-haspopup="dialog">库</button></div>
@@ -32,5 +33,5 @@
 <div id="settingsOverlay" class="settings-overlay" hidden><section class="settings-dialog" role="dialog" aria-modal="true" aria-labelledby="settingsTitle"><header><div><span class="eyebrow">PREFERENCES</span><h2 id="settingsTitle">设置</h2></div><button id="closeSettings" class="icon-button" aria-label="关闭设置">×</button></header><div class="settings-group"><strong>界面显示大小</strong><div class="settings-options" id="uiScaleOptions"><button type="button" data-scale="auto">自动</button><button type="button" data-scale="1">标准</button><button type="button" data-scale="1.1">放大</button><button type="button" data-scale="1.2">更大</button></div><p>自动模式会根据窗口宽度调整显示。</p></div><div class="settings-group"><strong>个股与指数页面图表布局</strong><div class="settings-options" id="chartLayoutOptions"><button type="button" data-layout="standard">单列</button><button type="button" data-layout="grid">六宫格</button></div></div><div class="settings-group"><strong>个股与指数图表日期</strong><div class="settings-options" id="stockDateModeOptions"><button type="button" data-mode="analysis">不看未来</button><button type="button" data-mode="latest">最新日期</button></div><p>“不看未来”显示所选复盘日数据；“最新日期”显示当前数据集中最新交易日。</p></div></section></div>
 <div id="chartZoomOverlay" class="chart-zoom-overlay" hidden><section class="chart-zoom-dialog" tabindex="-1" role="dialog" aria-modal="true" aria-labelledby="chartZoomTitle"><header><strong id="chartZoomTitle"></strong><div id="chartZoomControls" class="chart-zoom-controls" hidden></div><span id="chartZoomHint">双击图表或按 Esc 关闭</span><button id="closeChartZoom" type="button" aria-label="关闭放大图表">×</button></header><div id="chartZoomContent" class="chart-zoom-content"></div></section></div>
 <div id="toast" class="toast"></div>
-<script src="/vendor/klinecharts-10.1.0.min.js?v=css-coordinate-v1"></script><script src="/watchlists.js?v=20261027-watchlist-v3-monitor"></script><script src="/live_stocks.js?v=20261027-monitor-v8-three-cache"></script><script src="/database_panel.js?v=20261027-db-panel-v3-descriptions"></script><script src="/app.js?v=20261027-ladder-v416-multi-hover"></script>
+<script src="/vendor/klinecharts-10.1.0.min.js?v=css-coordinate-v1"></script><script src="/watchlists.js?v=20261027-watchlist-v3-monitor"></script><script src="/live_stocks.js?v=20261027-monitor-v8-three-cache"></script><script src="/condition_monitor.js?v=20261028-condition-canvas-v11"></script><script src="/database_panel.js?v=20261027-db-panel-v3-descriptions"></script><script src="/app.js?v=20261028-condition-canvas-v5"></script>
 </body></html>

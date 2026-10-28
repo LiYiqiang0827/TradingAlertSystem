@@ -43,6 +43,8 @@ def watchlists_store():
 
 from live_stock_monitor import LiveStockMonitor
 LIVE_STOCK_MONITOR=LiveStockMonitor(sys.modules[__name__])
+from condition_monitor import ConditionMonitor
+CONDITION_MONITOR=ConditionMonitor(sys.modules[__name__])
 from limitup_tracking import LimitupTracking
 LIMITUP_TRACKING=LimitupTracking(sys.modules[__name__])
 from database_status import DatabaseStatus, DatabaseBusy
@@ -390,7 +392,9 @@ def live_push_event(updates):
             (indices if kind=='snapshot_index' else quotes).append(quote)
     if kinds&{'snapshot','limitperformance','zt','break'}:CACHE.delete('ladder-live-snapshot:v5:'+now.strftime('%Y%m%d'))
     if 'snapshot_index' in kinds:CACHE.delete('ladder-live-index-quotes:v1:'+now.strftime('%Y%m%d'))
-    live=live_ladder_snapshot()
+    # Auction observations refresh the condition-monitor canvas; they do not change
+    # the ladder structure or stock quotes, so avoid rebuilding the ladder snapshot.
+    live=live_ladder_snapshot() if kinds-{'auction'} else {}
     return {'updates':updates,'quotes':quotes,'indices':indices,'receivedAt':now.isoformat(),
             'status':live_market_status(),'ladderStatus':{key:live.get(key) for key in ('date','available','updatedAt','revision','structureRevision','status','reason','frozen','sources','mode','offlineReady','sourceKinds')}}
 
@@ -2539,6 +2543,11 @@ class Handler(SimpleHTTPRequestHandler):
             if u.path=='/api/live-monitor-charts':
                 day=safe_date(q.get('date',[''])[0]);codes=LIVE_STOCK_MONITOR.codes(q.get('codes',[''])[0],3)
                 return self.send_json(LIVE_STOCK_MONITOR.charts(codes,day,q.get('period',['all'])[0]))
+            if u.path=='/api/condition-monitor':
+                try:return self.send_json(CONDITION_MONITOR.data())
+                except Exception:
+                    traceback.print_exc()
+                    return self.send_json({'error':'条件监控数据暂不可用，请检查竞价采集和离线涨停数据'},503)
             if u.path=='/api/live-events':return self.live_events()
             if u.path=='/api/live-push-status':return self.send_json(PUSH_HUB.status())
             if u.path=="/api/ladder-live-status":
